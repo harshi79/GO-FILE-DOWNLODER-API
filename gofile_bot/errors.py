@@ -32,13 +32,48 @@ class UnsupportedShareError(BotError):
     )
 
 
+class UnsupportedURLError(BotError):
+    user_message = (
+        "⚠️ I don't know how to download from that link yet.\n"
+        "Send /supported to see everything I can handle."
+    )
+
+
+class ResolveError(BotError):
+    """A non-GoFile provider could not read the user's link."""
+
+    user_message = (
+        "⚠️ Couldn't read that link. It may be deleted, private, or the site "
+        "is blocking the bot right now."
+    )
+
+
+class PrivateContentError(BotError):
+    user_message = (
+        "🔒 That content is private or needs a login, so the bot can't open it.\n"
+        "Only public links are supported."
+    )
+
+
+class RemoteDownloadError(BotError):
+    """A non-GoFile provider failed while streaming a file."""
+
+    user_message = "⚠️ The download failed. Please try again."
+
+
+class DownloadTimeoutError(BotError):
+    user_message = (
+        "⚠️ The download took too long and was stopped. Please try again."
+    )
+
+
 class GoFileError(BotError):
     """Base class for GoFile-side failures."""
 
 
 class ContentNotFoundError(GoFileError):
     user_message = (
-        "⚠️ This GoFile link doesn't exist or is no longer available.\n"
+        "⚠️ This link doesn't exist or is no longer available.\n"
         "Double-check the link and try again."
     )
 
@@ -101,9 +136,7 @@ class FileTooLargeError(BotError):
             parts = ["⚠️ This file is too big for Telegram uploads"]
             if size is not None and limit is not None:
                 parts.append(f"({human_size(size)} > {human_size(limit)})")
-            parts.append(
-                "Send a direct file link instead of a folder, or use a smaller file."
-            )
+            parts.append("Try a smaller file.")
             super().__init__(detail, user_message=" ".join(parts))
         self.size = size
         self.limit = limit
@@ -128,4 +161,4 @@ class JobBusyError(BotError):
 
 
 class JobExpiredError(BotError):
-    user_message = "⌛ This button has expired. Send /gofile again."
+    user_message = "⌛ This button has expired. Send the link again."

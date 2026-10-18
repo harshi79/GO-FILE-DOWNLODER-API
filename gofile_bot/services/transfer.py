@@ -18,21 +18,23 @@ from pathlib import Path
 
 from gofile_bot.config import (
     JOB_TIMEOUT,
+    MAX_CONCURRENT_DOWNLOADS,
     MAX_FILE_BYTES,
     MAX_FOLDER_FILES,
     MAX_FOLDER_TOTAL_BYTES,
     TMP_DIR_PREFIX,
     UPLOAD_MAX_ATTEMPTS,
 )
+from gofile_bot.downloaders.base import Downloader, DownloaderRegistry
 from gofile_bot.errors import (
     BotError,
     DownloadError,
+    DownloadTimeoutError,
     FileTooLargeError,
-    GoFileTimeoutError,
     JobCancelled,
+    RemoteDownloadError,
     TelegramUploadError,
 )
-from gofile_bot.gofile.client import GoFileClient
 from gofile_bot.gofile.models import Content, RemoteFile, RemoteFolder, collect_files
 from gofile_bot.services.jobs import Job
 from gofile_bot.services.status import StatusMessage
@@ -79,23 +81,61 @@ def cleanup_stale_tmpdirs(max_age_seconds: float = 3600) -> int:
 
 
 class TransferService:
-    """Performs the actual file transfer for a :class:`Job`."""
+    """Performs the actual file transfer for a :class:`Job`.
 
-    def __init__(self, bot, gofile: GoFileClient) -> None:
+    Downloads are dispatched to the provider named on the job. A global
+    semaphore caps how many transfers run at once across all users
+    (:data:`~gofile_bot.config.MAX_CONCURRENT_DOWNLOADS`) so a small
+    512 MB instance never gets swamped.
+    """
+
+    def __init__(
+        self,
+        bot,
+        downloaders,
+        *,
+        max_concurrent: int = MAX_CONCURRENT_DOWNLOADS,
+    ) -> None:
         self._bot = bot
-        self._gofile = gofile
+        self._registry = self._as_registry(downloaders)
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+
+    @staticmethod
+    def _as_registry(downloaders) -> DownloaderRegistry:
+        """Accept a registry, or legacy GoFile-client-like objects."""
+        if isinstance(downloaders, DownloaderRegistry):
+            return downloaders
+        if isinstance(downloaders, Downloader):
+            return DownloaderRegistry([downloaders])
+        # Legacy: a GoFileClient (or test fake) with fetch/download methods.
+        from gofile_bot.downloaders.gofile_provider import GoFileDownloader
+
+        return DownloaderRegistry([GoFileDownloader(downloaders)])
+
+    def _downloader_for(self, job: Job) -> Downloader:
+        provider = self._registry.get(job.provider) or self._registry.get("gofile")
+        if provider is None:  # pragma: no cover - registry always has gofile
+            raise RemoteDownloadError(f"no downloader for provider {job.provider!r}")
+        return provider
 
     async def run(self, job: Job) -> None:
         """Download and deliver the job's content; never raises."""
         status = StatusMessage(self._bot, job.chat_id, job.status_message_id)
         tmpdir = make_job_tmpdir()
         try:
-            await asyncio.wait_for(self._run(job, status, tmpdir), JOB_TIMEOUT)
+            if self._semaphore.locked():
+                await status.edit(
+                    "⏳ Queued — waiting for a free download slot…",
+                    self._cancel_markup(job),
+                    force=True,
+                )
+            async with self._semaphore:
+                await asyncio.wait_for(self._run(job, status, tmpdir), JOB_TIMEOUT)
         except JobCancelled:
             await status.edit("❌ Download cancelled.", None, force=True)
         except TimeoutError:
             logger.warning("job %s timed out", job.id)
-            await status.edit(GoFileTimeoutError.user_message, None, force=True)
+            await status.edit(DownloadTimeoutError.user_message, None, force=True)
         except FileTooLargeError as exc:
             await status.edit(exc.user_message, None, force=True)
         except TelegramUploadError as exc:
@@ -124,7 +164,10 @@ class TransferService:
         files = self._select_files(content)
         if not files:
             if isinstance(content, RemoteFolder) and content.file_count == 0:
-                raise DownloadError("This folder is empty — there is nothing to send.")
+                raise RemoteDownloadError(
+                    "empty folder",
+                    user_message="⚠️ This folder is empty — there is nothing to send.",
+                )
             raise FileTooLargeError(
                 "nothing deliverable",
                 user_message=(
@@ -212,7 +255,8 @@ class TransferService:
                 self._cancel_markup(job),
             )
 
-        await self._gofile.download_file(
+        downloader = self._downloader_for(job)
+        actual_path = await downloader.download(
             file,
             dest,
             max_bytes=MAX_FILE_BYTES,
@@ -232,7 +276,7 @@ class TransferService:
             None,
             force=True,
         )
-        await self._send_document(job, file, dest)
+        await self._send_document(job, file, Path(actual_path))
 
     def _cancel_markup(self, job: Job):
         from gofile_bot.telegram.keyboards import cancel_keyboard
