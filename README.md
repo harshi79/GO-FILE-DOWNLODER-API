@@ -100,8 +100,54 @@ python -m gofile_bot --debug            # verbose logging
 python -m gofile_bot --env-file /path/to/.env
 ```
 
-The bot runs long polling — no webhook or public IP needed. Stop with
-`Ctrl+C`.
+The bot runs long polling — no webhook or public IP needed. At the same time
+it serves `GET /health` → `200 OK` on `0.0.0.0:$PORT` (default `10000`) for
+Docker and Render health checks. Stop with `Ctrl+C`.
+
+---
+
+## Deploying to Render (or Docker)
+
+Because the bot uses Telegram **long polling** and also serves `GET /health`
+on `0.0.0.0:$PORT`, it runs cleanly as a Render **Web Service** using the
+included [`Dockerfile`](Dockerfile) and [`render.yaml`](render.yaml).
+
+### Option A — One-click Render Blueprint
+
+1. Push this repo to GitHub.
+2. In Render: **New → Blueprint** → select the repo (it reads `render.yaml`).
+3. Paste your `BOT_TOKEN` when prompted (and optionally `GOFILE_API_TOKEN`).
+4. Deploy. Render injects `PORT`, builds the Dockerfile, and probes `/health`.
+
+### Option B — Manual Render Web Service
+
+1. **New → Web Service** → connect your repo.
+2. **Runtime:** `Docker`
+3. **Health Check Path:** `/health`
+4. **Environment Variables:** add `BOT_TOKEN` (and optional `GOFILE_API_TOKEN`).
+
+> **About Render plans:** Render's **Free** web tier spins down after ~15 min
+> of no inbound HTTP traffic — while spun down, long polling stops until
+> something hits `/health` (or you upgrade to the $7/mo **Starter** plan /
+> Background Worker, which never sleeps). If you stay on Free, you can point a
+> free uptime monitor (e.g. UptimeRobot, every 5–10 min) at
+> `https://<your-service>.onrender.com/health` to keep it awake, within
+> Render's 750 free instance-hours/month.
+>
+> **Alternatives that work with the exact same `Dockerfile`:** Fly.io,
+> Railway, Koyeb, Northflank, or any small VPS (`docker run`).
+
+### Plain Docker
+
+```bash
+docker build -t gofile-bot .
+docker run -d --name gofile-bot --restart unless-stopped \
+  -p 10000:10000 \
+  --env-file .env \
+  gofile-bot
+
+curl http://localhost:10000/health   # -> OK
+```
 
 ---
 
@@ -164,9 +210,10 @@ raises Telegram's limits to 2 GB — raise `MAX_FILE_BYTES` accordingly.
 .
 ├── gofile_bot/
 │   ├── __main__.py            # CLI entry point: python -m gofile_bot
-│   ├── app.py                 # Application assembly, lifecycle hooks
+│   ├── app.py                 # Application assembly + lifecycle (bot + /health)
 │   ├── config.py              # .env settings + operational constants
 │   ├── errors.py              # Typed errors with friendly user messages
+│   ├── health.py              # Tiny aiohttp server: GET /health -> 200 OK
 │   ├── gofile/
 │   │   ├── client.py          # Async GoFile client (metadata + streaming DL)
 │   │   ├── models.py          # Content/file/folder models, payload parsing
@@ -181,6 +228,8 @@ raises Telegram's limits to 2 GB — raise `MAX_FILE_BYTES` accordingly.
 │       ├── handlers.py        # /start /help /gofile + button callbacks
 │       └── keyboards.py       # Inline keyboards
 ├── tests/                     # Unit tests (mocked network, no real API calls)
+├── Dockerfile                 # Non-root python:3.11-slim image with HEALTHCHECK
+├── render.yaml                # Render Blueprint (Docker web service + /health)
 ├── requirements.txt
 ├── requirements-dev.txt
 ├── .env.example

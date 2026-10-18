@@ -95,6 +95,9 @@ TMP_DIR_PREFIX = "gofile-bot-"
 #: Directory used for temporary downloads. Defaults to the system temp dir.
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
 
+#: Port for the /health HTTP server. Platforms like Render inject ``PORT``.
+DEFAULT_HEALTH_PORT = 10_000
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -103,6 +106,24 @@ class Settings:
     bot_token: str
     gofile_api_token: str | None = None
     gofile_wt_salt: str = DEFAULT_GOFILE_WT_SALT
+
+
+def get_health_port() -> int:
+    """Port for the /health server (``PORT`` env var, default 10000).
+
+    Hosting platforms such as Render inject ``PORT`` automatically. The value
+    must be a valid TCP port.
+    """
+    raw = os.environ.get("PORT", "").strip()
+    if not raw:
+        return DEFAULT_HEALTH_PORT
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"PORT must be a number, got {raw!r}") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError(f"PORT must be in 1..65535, got {port}")
+    return port
 
 
 def load_settings(env_file: str | None = ".env") -> Settings:

@@ -1,0 +1,19 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Deploy: Render Dashboard → New → Blueprint → point at this repository.
+# Set BOT_TOKEN when prompted (or afterwards in the service's Environment).
+# Render injects PORT automatically; the bot answers GET /health with 200 OK.
+services:
+  - type: web
+    name: gofile-telegram-bot
+    runtime: docker
+    plan: starter # use "free" to try it out — free web services spin down when idle
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false # set this in the dashboard (secret)
+      - key: GOFILE_API_TOKEN
+        sync: false # optional: your GoFile account token
+      - key: GOFILE_WT_SALT
+        value: 12af056dacea0b
