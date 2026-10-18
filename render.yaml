@@ -17,3 +17,5 @@ services:
         sync: false # optional: your GoFile account token
       - key: GOFILE_WT_SALT
         value: 12af056dacea0b
+      - key: ENABLE_DIRECT_DOWNLOADS
+        value: "true" # set "false" to accept only known file hosts

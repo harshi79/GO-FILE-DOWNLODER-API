@@ -13,7 +13,7 @@ _PASSWORD_OK = "passwordOk"
 
 @dataclass(frozen=True)
 class RemoteFile:
-    """A single file on GoFile."""
+    """A single downloadable file (from any provider)."""
 
     id: str
     name: str
@@ -21,6 +21,8 @@ class RemoteFile:
     mimetype: str
     link: str
     md5: str | None = None
+    #: Original page the file was resolved from (when different from *link*).
+    webpage_url: str = ""
 
     @property
     def is_file(self) -> bool:

@@ -10,6 +10,9 @@ from gofile_bot.gofile.models import Content, RemoteFile, RemoteFolder
 DOWNLOAD_LABEL = "「 DOWNLOAD 」"
 CANCEL_LABEL = "❌ Cancel"
 
+#: Credit tag shown in bot messages and file captions.
+MADE_BY = "Made By @Yorichiiprime"
+
 
 def esc(text: str) -> str:
     """HTML-escape user/file-controlled text."""
@@ -35,17 +38,25 @@ def file_type_label(file: RemoteFile) -> str:
     return guessed or "application/octet-stream"
 
 
-def fetch_status_text() -> str:
+def fetch_status_text(source: str | None = None) -> str:
+    if source:
+        return f"⌕ Fetching file information from {source}..."
     return "⌕ Fetching file information..."
 
 
-def info_text(content: Content) -> str:
+def _size_label(size: int) -> str:
+    return human_size(size) if size > 0 else "unknown"
+
+
+def info_text(content: Content, source_label: str | None = None) -> str:
     """Result card shown after metadata lookup."""
+    source = f"\n🌐 Source: {esc(source_label)}" if source_label else ""
     if isinstance(content, RemoteFile):
         return (
             f"📄 <b>{esc(content.name)}</b>\n"
-            f"💾 Size: {human_size(content.size)}\n"
+            f"💾 Size: {_size_label(content.size)}\n"
             f"🗂 Type: {esc(file_type_label(content))}"
+            f"{source}"
         )
     files = content.files()
     total = sum(f.size for f in files)
@@ -53,7 +64,8 @@ def info_text(content: Content) -> str:
         f"📁 <b>{esc(content.name)}</b>\n"
         f"🗂 Type: Folder\n"
         f"📄 {len(files)} file{'s' if len(files) != 1 else ''} · "
-        f"💾 {human_size(total)} total"
+        f"💾 {_size_label(total)} total"
+        f"{source}"
     )
 
 
@@ -115,4 +127,7 @@ def folder_note_text(content: RemoteFolder, *, skipped: list[str]) -> str:
 
 
 def caption_for(file: RemoteFile) -> str:
-    return f"💾 {human_size(file.size)} · 🗂 {esc(file_type_label(file))}"
+    return (
+        f"💾 {human_size(file.size)} · 🗂 {esc(file_type_label(file))}\n"
+        f"{MADE_BY}"
+    )

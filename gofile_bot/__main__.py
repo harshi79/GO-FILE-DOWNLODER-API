@@ -20,7 +20,10 @@ def _configure_logging(debug: bool) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m gofile_bot",
-        description="GoFile.io Telegram File Downloader Bot",
+        description=(
+            "Telegram File Downloader Bot (GoFile, Google Drive, Dropbox, "
+            "OneDrive, MediaFire, Pixeldrain, archive.org, direct links)"
+        ),
     )
     parser.add_argument(
         "--debug",

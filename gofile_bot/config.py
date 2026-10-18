@@ -98,6 +98,38 @@ DOWNLOAD_CHUNK_SIZE = 64 * 1024
 #: Port for the /health HTTP server. Platforms like Render inject ``PORT``.
 DEFAULT_HEALTH_PORT = 10_000
 
+# ---------------------------------------------------------------------------
+# Additional downloaders (direct links, Google Drive, Dropbox, OneDrive,
+# MediaFire, Pixeldrain, Internet Archive)
+#
+# All of them work the same low-RAM way: fetch small JSON/HTML metadata to
+# obtain a direct URL, then stream the file to disk in DOWNLOAD_CHUNK_SIZE
+# chunks. Nothing loads a whole file (or a media toolchain) into memory, so
+# the bot stays comfortable on a 512 MB instance.
+# ---------------------------------------------------------------------------
+
+#: Browser-like UA used by the generic (non-GoFile) downloaders.
+GENERIC_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+)
+
+#: Redirect hops followed manually (each hop is re-validated) by the generic
+#: HTTP downloaders.
+DIRECT_MAX_REDIRECTS = 5
+
+#: Maximum downloads running at the same time across *all* users. Each one
+#: streams with a small fixed buffer, but on a 512 MB box a hard cap keeps
+#: worst-case memory (and bandwidth/disk churn) predictable.
+MAX_CONCURRENT_DOWNLOADS = 3
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -106,6 +138,9 @@ class Settings:
     bot_token: str
     gofile_api_token: str | None = None
     gofile_wt_salt: str = DEFAULT_GOFILE_WT_SALT
+    #: Allow arbitrary direct http(s) file links (SSRF-guarded). Set
+    #: ENABLE_DIRECT_DOWNLOADS=false to accept only known file hosts.
+    enable_direct_downloads: bool = True
 
 
 def get_health_port() -> int:
@@ -156,4 +191,5 @@ def load_settings(env_file: str | None = ".env") -> Settings:
         bot_token=bot_token,
         gofile_api_token=api_token,
         gofile_wt_salt=salt,
+        enable_direct_downloads=_env_bool("ENABLE_DIRECT_DOWNLOADS", True),
     )

@@ -19,7 +19,7 @@ from gofile_bot.gofile.models import Content
 
 @dataclass
 class Job:
-    """A single /gofile request and its download state."""
+    """A single download request (any provider) and its download state."""
 
     id: str
     user_id: int
@@ -27,6 +27,10 @@ class Job:
     status_message_id: int
     content_id: str
     password: str | None = None
+    #: Registry name of the provider handling this job (e.g. ``"gofile"``).
+    provider: str = "gofile"
+    #: Original link the user sent.
+    source_url: str = ""
     content: Content | None = None
     created_at: float = field(default_factory=time.time)
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -50,8 +54,10 @@ class JobStore:
         user_id: int,
         chat_id: int,
         status_message_id: int,
-        content_id: str,
-        password: str | None,
+        content_id: str = "",
+        password: str | None = None,
+        provider: str = "gofile",
+        source_url: str = "",
     ) -> Job:
         self.purge_expired()
         job = Job(
@@ -61,6 +67,8 @@ class JobStore:
             status_message_id=status_message_id,
             content_id=content_id,
             password=password,
+            provider=provider,
+            source_url=source_url,
         )
         self._jobs[job.id] = job
         return job
