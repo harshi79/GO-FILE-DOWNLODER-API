@@ -218,3 +218,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Project specific ---
+# Secrets and local environment
+.env
+.venv/
+venv/
+
+# Bot runtime artifacts
+*.log
+*.part
+Downloads/
+tmp/

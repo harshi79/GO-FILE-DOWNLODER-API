@@ -1,0 +1,10 @@
+# Development / test dependencies
+-r requirements.txt
+
+# aioresponses patches aiohttp internals; cap aiohttp to a version it
+# supports. Runtime (requirements.txt) is fine with newer aiohttp.
+aiohttp>=3.10,<3.14
+
+pytest>=8.0
+pytest-asyncio>=0.24
+aioresponses>=0.7.8
