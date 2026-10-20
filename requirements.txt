@@ -1,4 +1,7 @@
 # Runtime dependencies (Python 3.11+)
-python-telegram-bot>=22.0,<23.0
+python-telegram-bot>=22.8,<23.0
 aiohttp>=3.10,<4.0
 python-dotenv>=1.0,<2.0
+Telethon>=1.36,<2.0
+# Native AES keeps multi-GB MTProto uploads practical on small CPUs.
+cryptg>=0.5,<1.0

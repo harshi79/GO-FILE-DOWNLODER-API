@@ -11,7 +11,7 @@ import logging
 import time
 
 from telegram import Bot, InlineKeyboardMarkup
-from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram.error import BadRequest, Forbidden, TelegramError, RetryAfter
 
 from gofile_bot.config import PROGRESS_EDIT_INTERVAL
 
@@ -35,6 +35,7 @@ class StatusMessage:
         self._min_interval = min_interval
         self._last_edit = 0.0
         self._last_text: str | None = None
+        self._blocked_until = 0.0
 
     async def edit(
         self,
@@ -49,11 +50,14 @@ class StatusMessage:
         one per ``min_interval`` seconds.
         """
         now = time.monotonic()
+        if now < self._blocked_until:
+            return False
         if text == self._last_text and keyboard is None:
             return False
         if not force and now - self._last_edit < self._min_interval:
             return False
 
+        self._last_edit = now  # Also throttle failures, not just successful edits.
         try:
             await self._bot.edit_message_text(
                 chat_id=self.chat_id,
@@ -63,6 +67,11 @@ class StatusMessage:
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
+        except RetryAfter as exc:
+            delay = exc.retry_after
+            seconds = delay.total_seconds() if hasattr(delay, "total_seconds") else float(delay)
+            self._blocked_until = now + seconds
+            return False
         except BadRequest as exc:
             msg = str(exc).lower()
             if "message is not modified" in msg:

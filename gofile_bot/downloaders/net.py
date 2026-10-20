@@ -31,10 +31,12 @@ import aiohttp
 
 from gofile_bot.config import (
     DIRECT_MAX_REDIRECTS,
+    HARD_MAX_FILE_BYTES,
     DOWNLOAD_CHUNK_SIZE,
     DOWNLOAD_SOCK_READ_TIMEOUT,
 )
 from gofile_bot.downloaders.base import ProgressCallback
+from gofile_bot.services.resources import disk_io
 from gofile_bot.errors import (
     FileTooLargeError,
     JobCancelled,
@@ -159,6 +161,9 @@ async def stream_to_file(
     timeout = aiohttp.ClientTimeout(
         total=None, connect=30, sock_read=DOWNLOAD_SOCK_READ_TIMEOUT
     )
+    max_bytes = min(max_bytes, HARD_MAX_FILE_BYTES)
+    if expected_size and expected_size > max_bytes:
+        raise FileTooLargeError(size=expected_size, limit=max_bytes)
     current = url
     part_path = dest.with_suffix(dest.suffix + ".part")
     written = 0
@@ -172,7 +177,8 @@ async def stream_to_file(
                 await validate_public_url(current, resolver=resolver)
 
             async with session.get(
-                current, headers=headers, timeout=timeout, allow_redirects=False
+                current, headers={**(headers or {}), "Accept-Encoding": "identity"},
+                timeout=timeout, allow_redirects=False, auto_decompress=False
             ) as resp:
                 if resp.status in _REDIRECT_STATUSES:
                     location = resp.headers.get("Location")
@@ -183,6 +189,8 @@ async def stream_to_file(
                 if resp.status != 200:
                     raise RemoteDownloadError(f"HTTP {resp.status} for {current}")
 
+                if resp.headers.get("Content-Encoding", "identity").lower() not in ("", "identity"):
+                    raise RemoteDownloadError("Server ignored identity encoding; compressed transfer refused")
                 total = expected_size
                 content_length = resp.headers.get("Content-Length", "")
                 if content_length.isdigit():
@@ -197,7 +205,7 @@ async def stream_to_file(
                         written += len(chunk)
                         if written > max_bytes:
                             raise FileTooLargeError(size=written, limit=max_bytes)
-                        fh.write(chunk)
+                        await disk_io(fh.write, chunk)
                         if progress is not None:
                             await progress(written, total)
                 part_path.replace(dest)
@@ -271,6 +279,8 @@ async def probe_url(
                     break
             except (TimeoutError, aiohttp.ClientError) as exc:
                 raise ResolveError(str(exc)) from exc
+        else:
+            raise ResolveError("too many redirects")
         # Some servers reject HEAD outright; retry once with a ranged GET.
         if method == "HEAD" and status in (400, 403, 405, 501):
             continue

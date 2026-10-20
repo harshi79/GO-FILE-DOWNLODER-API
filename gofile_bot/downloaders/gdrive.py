@@ -22,6 +22,8 @@ from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 
+from gofile_bot.metadata import read_text
+
 from gofile_bot.downloaders.base import HTTPDownloader, ProgressCallback, host_matches
 from gofile_bot.downloaders.net import (
     filename_from_disposition,
@@ -136,9 +138,7 @@ class GoogleDriveDownloader(HTTPDownloader):
                     final = str(resp.url)
                     ctype = headers.get("Content-Type", "")
                     if "text/html" in ctype:
-                        body = (await resp.content.read(512_000)).decode(
-                            "utf-8", "replace"
-                        )
+                        body = await read_text(resp)
                         confirmed = parse_confirm_form(body)
                         if confirmed:
                             current = confirmed

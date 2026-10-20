@@ -300,3 +300,19 @@ async def test_download_http_error(settings, tmp_path: Path):
                 await client.download_file(file, tmp_path / "e", max_bytes=1000)
         finally:
             await client.close()
+
+
+async def test_download_rejects_redirect_to_foreign_host(settings, tmp_path):
+    """Never forward an accountToken cookie outside the GoFile allowlist."""
+    with aioresponses() as m:
+        m.post(ACCOUNTS, payload=ACCOUNT_OK)
+        m.get(DOWNLOAD, status=302, headers={"Location": "https://evil.com/steal"})
+        client = make_client(settings)
+        await client.start()
+        try:
+            file = RemoteFile(id="fid", name="doc.pdf", size=1, mimetype="application/pdf", link="https://store-1.gofile.io/download/web/fid/doc.pdf")
+            with pytest.raises(DownloadError):
+                await client.download_file(file, tmp_path / "file", max_bytes=100)
+            assert not any(str(url).startswith("https://evil.com") for _, url in m.requests)
+        finally:
+            await client.close()

@@ -13,7 +13,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from gofile_bot.config import JOB_TTL
+from gofile_bot.config import JOB_TTL, MAX_STORED_JOBS, MAX_USER_CARDS
+from gofile_bot.errors import ServiceBusyError
 from gofile_bot.gofile.models import Content
 
 
@@ -35,6 +36,8 @@ class Job:
     created_at: float = field(default_factory=time.time)
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     running: bool = False
+    action: str = "download"
+    phase: str = "ready"
 
     @property
     def cancelled(self) -> bool:
@@ -44,7 +47,8 @@ class Job:
 class JobStore:
     """Thread-of-execution safe (single event loop) job storage."""
 
-    def __init__(self, ttl: float = JOB_TTL) -> None:
+    def __init__(self, ttl: float = JOB_TTL, max_jobs: int = MAX_STORED_JOBS) -> None:
+        self._max_jobs = max_jobs
         self._ttl = ttl
         self._jobs: dict[str, Job] = {}
 
@@ -60,6 +64,14 @@ class JobStore:
         source_url: str = "",
     ) -> Job:
         self.purge_expired()
+        idle = [j for j in self._jobs.values() if j.user_id == user_id and not j.running]
+        while len(idle) >= MAX_USER_CARDS:
+            self._jobs.pop(idle.pop(0).id, None)
+        if len(self._jobs) >= self._max_jobs:
+            oldest = next((j for j in self._jobs.values() if not j.running), None)
+            if oldest is None:
+                raise ServiceBusyError()
+            self._jobs.pop(oldest.id)
         job = Job(
             id=uuid.uuid4().hex,
             user_id=user_id,
@@ -77,7 +89,7 @@ class JobStore:
         job = self._jobs.get(job_id)
         if job is None:
             return None
-        if time.time() - job.created_at > self._ttl:
+        if not job.running and time.time() - job.created_at > self._ttl:
             self._jobs.pop(job_id, None)
             return None
         return job
@@ -90,9 +102,12 @@ class JobStore:
 
     def purge_expired(self) -> None:
         now = time.time()
-        stale = [jid for jid, job in self._jobs.items() if now - job.created_at > self._ttl]
+        stale = [jid for jid, job in self._jobs.items() if not job.running and now - job.created_at > self._ttl]
         for jid in stale:
             self._jobs.pop(jid, None)
+
+    def remove(self, job_id: str) -> None:
+        self._jobs.pop(job_id, None)
 
     def __len__(self) -> int:
         return len(self._jobs)

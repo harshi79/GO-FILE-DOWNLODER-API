@@ -176,8 +176,11 @@ async def test_transfer_dispatches_to_job_provider(tmp_path):
         def matches(self, url):
             return True
 
-        async def resolve(self, url, password=None):  # pragma: no cover
-            raise NotImplementedError
+        async def resolve(self, url, password=None):
+            return RemoteFile(
+                id="f1", name="thing.zip", size=4,
+                mimetype="application/zip", link="https://fakehost.example/dl/f1",
+            )
 
         async def download(
             self, file, dest, *, max_bytes, progress=None,
@@ -235,8 +238,11 @@ async def test_transfer_global_concurrency_cap():
         def matches(self, url):
             return True
 
-        async def resolve(self, url, password=None):  # pragma: no cover
-            raise NotImplementedError
+        async def resolve(self, url, password=None):
+            return RemoteFile(
+                id="f1", name="thing.zip", size=4,
+                mimetype="application/zip", link="https://fakehost.example/dl/f1",
+            )
 
         async def download(
             self, file, dest, *, max_bytes, progress=None,
@@ -278,3 +284,64 @@ async def test_transfer_global_concurrency_cap():
     await asyncio.gather(*tasks)
     assert state["peak"] == 2
     assert all(not job.running for job in jobs)
+
+
+async def test_links_cmd_resolves_fresh_without_uploading():
+    context, provider = make_context()
+    update = make_update("/links https://fakehost.example/f/abc secret")
+    await handlers.links_cmd(update, context)
+    assert provider.resolved == ["https://fakehost.example/f/abc"]
+    assert "https://fakehost.example/dl/f1" in update.message.reply_html.await_args.args[0]
+    context.application.bot.send_document.assert_not_awaited()
+    assert len(context.application.bot_data["jobs"]) == 0
+
+
+async def test_links_usage():
+    context, _ = make_context()
+    update = make_update("/links")
+    await handlers.links_cmd(update, context)
+    assert "/links <url>" in update.message.reply_text.await_args.args[0]
+
+
+async def test_links_rejects_non_http_and_escapes_names():
+    context, provider = make_context()
+    provider.resolve = AsyncMock(return_value=RemoteFile(
+        id="f", name="<script>", size=1, mimetype="text/plain", link="javascript:alert(1)",
+    ))
+    update = make_update("/links https://fakehost.example/f/abc")
+    await handlers.links_cmd(update, context)
+    update.message.reply_html.assert_not_awaited()
+    assert "No browser download links" in update.message.reply_text.await_args.args[0]
+    provider.resolve.return_value = RemoteFile(
+        id="f", name="<script>", size=1, mimetype="text/plain",
+        link='https://fakehost.example/file?a=1&b="x"',
+    )
+    await handlers.links_cmd(update, context)
+    text = update.message.reply_html.await_args.args[0]
+    assert "&lt;script&gt;" in text
+    assert "&amp;b=&quot;x&quot;" in text
+
+
+async def test_transfer_refreshes_old_cdn_link_before_download():
+    from gofile_bot.services.transfer import TransferService
+
+    context, provider = make_context()
+    job = context.application.bot_data["jobs"].create(
+        user_id=1, chat_id=2, status_message_id=3,
+        provider=provider.name, source_url="https://fakehost.example/f/abc", password="secret",
+    )
+    job.content = RemoteFile(id="old", name="old.zip", size=4, mimetype="application/zip", link="https://expired.example/old")
+    provider.resolve = AsyncMock(return_value=RemoteFile(
+        id="new", name="fresh.zip", size=4, mimetype="application/zip", link="https://fakehost.example/new",
+    ))
+    seen = []
+
+    async def download(file, dest, **kwargs):
+        seen.append(file.link)
+        dest.write_bytes(b"data")
+        return dest
+
+    provider.download = download
+    await TransferService(context.application.bot, context.application.bot_data["downloaders"]).run(job)
+    provider.resolve.assert_awaited_once_with(job.source_url, password="secret")
+    assert seen == ["https://fakehost.example/new"]

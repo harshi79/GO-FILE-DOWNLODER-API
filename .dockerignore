@@ -21,3 +21,9 @@ Dockerfile
 render.yaml
 *.log
 *.part
+
+*.session
+*.session-journal
+
+# Local temporary download data
+downloads/

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from urllib.parse import quote
 
 from gofile_bot.errors import PasswordIncorrectError, PasswordRequiredError
@@ -68,6 +68,22 @@ def collect_files(content: Content) -> list[RemoteFile]:
     if isinstance(content, RemoteFile):
         return [content]
     return content.files()
+
+
+def bounded_content(content: Content) -> Content:
+    """Keep in-memory cards compact even when a host returns a huge folder."""
+    from gofile_bot.config import MAX_RESOLVED_FILES
+
+    def compact(file: RemoteFile) -> RemoteFile:
+        return replace(file, id=file.id[:256], mimetype=file.mimetype[:128],
+                       md5=file.md5[:128] if file.md5 else None, name=file.name[:256], link=file.link[:4096],
+                       webpage_url=file.webpage_url[:4096], size=max(0, file.size))
+
+    if isinstance(content, RemoteFile):
+        return compact(content)
+    return replace(content, id=content.id[:256], name=content.name[:256], children=tuple(
+        compact(file) for file in content.files()[:MAX_RESOLVED_FILES]
+    ))
 
 
 def _build_file_link(data: dict) -> str:

@@ -16,6 +16,8 @@ from pathlib import Path
 
 import aiohttp
 
+from gofile_bot.metadata import read_json
+
 from gofile_bot.downloaders.base import HTTPDownloader, ProgressCallback, host_matches
 from gofile_bot.downloaders.net import stream_to_file
 from gofile_bot.errors import ContentNotFoundError, ResolveError
@@ -87,7 +89,7 @@ class PixeldrainDownloader(HTTPDownloader):
             async with self.session.get(url) as resp:
                 if resp.status == 404:
                     raise ContentNotFoundError(f"HTTP 404 for {url}")
-                payload = await resp.json(content_type=None)
+                payload = await read_json(resp)
         except (TimeoutError, aiohttp.ClientError) as exc:
             raise ResolveError(str(exc)) from exc
         if not isinstance(payload, dict):

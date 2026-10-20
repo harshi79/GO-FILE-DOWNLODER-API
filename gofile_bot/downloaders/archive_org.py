@@ -19,6 +19,8 @@ from urllib.parse import quote, unquote, urlparse
 
 import aiohttp
 
+from gofile_bot.metadata import read_json
+
 from gofile_bot.downloaders.base import HTTPDownloader, ProgressCallback, host_matches
 from gofile_bot.downloaders.net import stream_to_file
 from gofile_bot.errors import ContentNotFoundError, ResolveError
@@ -123,7 +125,7 @@ class ArchiveOrgDownloader(HTTPDownloader):
                     raise ContentNotFoundError(f"archive.org 404 for {identifier}")
                 if resp.status != 200:
                     raise ResolveError(f"archive.org HTTP {resp.status}")
-                data = await resp.json(content_type=None)
+                data = await read_json(resp)
         except (TimeoutError, aiohttp.ClientError) as exc:
             raise ResolveError(str(exc)) from exc
         if not isinstance(data, dict) or not data.get("metadata"):

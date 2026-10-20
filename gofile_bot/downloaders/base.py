@@ -98,7 +98,9 @@ class HTTPDownloader(Downloader):
     def session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
-                headers={"User-Agent": GENERIC_USER_AGENT, "Accept": "*/*"},
+                auto_decompress=False,
+                skip_auto_headers={"Accept-Encoding"},
+                headers={"User-Agent": GENERIC_USER_AGENT, "Accept": "*/*", "Accept-Encoding": "identity"},
                 timeout=aiohttp.ClientTimeout(total=METADATA_TIMEOUT),
             )
             self._owns_session = True
