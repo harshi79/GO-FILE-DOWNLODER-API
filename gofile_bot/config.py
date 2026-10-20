@@ -9,7 +9,8 @@ adjust when running the bot.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
 # GoFile API
@@ -70,6 +71,22 @@ API_CONCURRENCY = 3
 #: multipart envelope also fits. Raise this only when running a Local Bot API
 #: server (which allows up to 2 GB).
 MAX_FILE_BYTES = 48 * 1024 * 1024
+# Absolute policy limit: decimal 2 GB. Lower transport limits still apply.
+HARD_MAX_FILE_BYTES = 2_000_000_000
+LARGE_MAX_FILE_BYTES = HARD_MAX_FILE_BYTES
+# Decimal MB for the user-facing ZIP policy, on input AND expanded output.
+MAX_ZIP_BYTES = 20_000_000
+MAX_ZIP_FILES = 20
+MAX_ZIP_ENTRIES = 100
+ZIP_TIMEOUT = 20
+MAX_PENDING_TRANSFERS = 8
+QUEUE_TIMEOUT = 10 * 60
+MAX_STORED_JOBS = 64
+MAX_USER_CARDS = 3
+MAX_METADATA_BYTES = 1024 * 1024
+MAX_RESOLVED_FILES = 50
+MAX_UPDATE_QUEUE = 32
+LOCAL_MAX_FILE_BYTES = LARGE_MAX_FILE_BYTES
 
 #: Folder shares: caps that keep a single button press from turning into an
 #: unbounded multi-gigabyte transfer.
@@ -121,7 +138,7 @@ DIRECT_MAX_REDIRECTS = 5
 #: Maximum downloads running at the same time across *all* users. Each one
 #: streams with a small fixed buffer, but on a 512 MB box a hard cap keeps
 #: worst-case memory (and bandwidth/disk churn) predictable.
-MAX_CONCURRENT_DOWNLOADS = 3
+MAX_CONCURRENT_DOWNLOADS = 1
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -135,12 +152,58 @@ def _env_bool(name: str, default: bool) -> bool:
 class Settings:
     """Runtime settings loaded from the environment."""
 
-    bot_token: str
+    bot_token: str = field(repr=False)
     gofile_api_token: str | None = None
     gofile_wt_salt: str = DEFAULT_GOFILE_WT_SALT
     #: Allow arbitrary direct http(s) file links (SSRF-guarded). Set
     #: ENABLE_DIRECT_DOWNLOADS=false to accept only known file hosts.
     enable_direct_downloads: bool = True
+    #: Operator-owned Bot API endpoint, e.g. http://telegram-bot-api:8081.
+    telegram_api_url: str | None = None
+    download_dir: str | None = None
+    enable_mtproto: bool = False
+    api_id: int | None = None
+    api_hash: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.enable_mtproto:
+            if self.telegram_api_url:
+                raise ValueError("Choose ENABLE_MTPROTO or TELEGRAM_API_URL, not both")
+            if not isinstance(self.api_id, int) or isinstance(self.api_id, bool) or self.api_id <= 0:
+                raise ValueError("API_ID must be a positive integer when ENABLE_MTPROTO=true")
+            if (not self.api_hash or len(self.api_hash) != 32
+                    or any(c not in "0123456789abcdefABCDEF" for c in self.api_hash)):
+                raise ValueError("API_HASH must be the 32-character hex hash from my.telegram.org")
+        if self.telegram_api_url:
+            parsed = urlparse(self.telegram_api_url)
+            if (
+                parsed.scheme not in ("http", "https") or not parsed.hostname
+                or parsed.username or parsed.password or parsed.query
+                or parsed.fragment or parsed.path not in ("", "/")
+            ):
+                raise ValueError(
+                    "TELEGRAM_API_URL must be an http(s) server origin, "
+                    "without a path or credentials"
+                )
+            # Accessing .port also rejects malformed/non-numeric TCP ports.
+            if parsed.port is not None and not 1 <= parsed.port <= 65535:
+                raise ValueError("TELEGRAM_API_URL has an invalid port")
+
+    @property
+    def max_file_bytes(self) -> int:
+        return LARGE_MAX_FILE_BYTES if self.large_files_enabled else MAX_FILE_BYTES
+
+    @property
+    def large_files_enabled(self) -> bool:
+        return bool(self.telegram_api_url or self.enable_mtproto)
+
+    @property
+    def max_concurrent_downloads(self) -> int:
+        return MAX_CONCURRENT_DOWNLOADS
+
+    @property
+    def job_timeout(self) -> int:
+        return 6 * 60 * 60 if self.large_files_enabled else JOB_TIMEOUT
 
 
 def get_health_port() -> int:
@@ -187,9 +250,20 @@ def load_settings(env_file: str | None = ".env") -> Settings:
     api_token = os.environ.get("GOFILE_API_TOKEN", "").strip() or None
     salt = os.environ.get("GOFILE_WT_SALT", "").strip() or DEFAULT_GOFILE_WT_SALT
 
+    raw_api_id = os.environ.get("API_ID", "").strip()
+    try:
+        api_id = int(raw_api_id) if raw_api_id else None
+    except ValueError as exc:
+        raise ValueError("API_ID must be a positive integer") from exc
+
     return Settings(
         bot_token=bot_token,
         gofile_api_token=api_token,
         gofile_wt_salt=salt,
         enable_direct_downloads=_env_bool("ENABLE_DIRECT_DOWNLOADS", True),
+        telegram_api_url=os.environ.get("TELEGRAM_API_URL", "").strip().rstrip("/") or None,
+        download_dir=os.environ.get("DOWNLOAD_DIR", "").strip() or None,
+        enable_mtproto=_env_bool("ENABLE_MTPROTO", False),
+        api_id=api_id,
+        api_hash=os.environ.get("API_HASH", "").strip() or None,
     )

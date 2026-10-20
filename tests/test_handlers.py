@@ -209,3 +209,27 @@ async def test_start_and_help():
     await handlers.help_cmd(update, context)
     update.message.reply_html.assert_awaited()
     assert "Commands" in update.message.reply_html.await_args.args[0]
+
+
+async def test_old_download_button_cannot_bypass_active_user_limit():
+    context, jobs = make_context(content=make_file(), transfer_run=AsyncMock())
+    active = jobs.create(user_id=7, chat_id=50, status_message_id=1)
+    active.running = True
+    old = jobs.create(user_id=7, chat_id=50, status_message_id=2)
+    old.content = make_file()
+    query = SimpleNamespace(data=f"dl:{old.id}", from_user=SimpleNamespace(id=7), answer=AsyncMock())
+    await handlers.download_cb(SimpleNamespace(callback_query=query), context)
+    assert "already have a download" in query.answer.await_args.kwargs["text"]
+    context.application.bot_data["transfer"].run.assert_not_awaited()
+
+
+async def test_button_reserves_user_before_answering():
+    context, jobs = make_context(content=make_file(), transfer_run=AsyncMock())
+    job = jobs.create(user_id=7, chat_id=50, status_message_id=1)
+    job.content = make_file()
+
+    async def answer(**kwargs):
+        assert jobs.active_for_user(7) is job
+
+    query = SimpleNamespace(data=f"dl:{job.id}", from_user=SimpleNamespace(id=7), answer=answer)
+    await handlers.download_cb(SimpleNamespace(callback_query=query), context)

@@ -76,6 +76,7 @@ def progress_text(
     total: int | None,
     file_index: int | None = None,
     file_count: int | None = None,
+    elapsed: float | None = None,
 ) -> str:
     prefix = ""
     if file_index is not None and file_count is not None:
@@ -86,6 +87,10 @@ def progress_text(
         filled = int(bar_len * percent / 100)
         bar = "█" * filled + "░" * (bar_len - filled)
         detail = f"{human_size(received)} / {human_size(total)}"
+        if elapsed and elapsed >= 1 and received > 0:
+            speed = received / elapsed
+            seconds = max(0, int((total - received) / speed))
+            detail += f"\n⚡ {human_size(speed)}/s · ETA {seconds // 60}m {seconds % 60}s"
         return (
             f"⏳ Downloading… {percent}%\n"
             f"<code>{bar}</code>\n"
@@ -105,6 +110,12 @@ def uploading_text(
     if file_index is not None and file_count is not None:
         prefix = f"📎 File {file_index}/{file_count}\n"
     return f"📤 Uploading to Telegram…\n{prefix}📄 {esc(filename)}"
+
+
+def upload_progress_text(*, filename: str, sent: int, total: int | None) -> str:
+    return progress_text(filename=filename, received=sent, total=total).replace(
+        "⏳ Downloading…", "📤 Uploading…", 1
+    )
 
 
 def success_text(content: Content, sent: list[str] | None = None) -> str:

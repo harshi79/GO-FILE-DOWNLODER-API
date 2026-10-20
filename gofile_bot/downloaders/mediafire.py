@@ -17,6 +17,8 @@ from urllib.parse import unquote
 
 import aiohttp
 
+from gofile_bot.metadata import read_text
+
 from gofile_bot.downloaders.base import HTTPDownloader, ProgressCallback, host_matches
 from gofile_bot.downloaders.net import parse_size_text, stream_to_file
 from gofile_bot.errors import ContentNotFoundError, RemoteDownloadError, ResolveError
@@ -110,7 +112,7 @@ class MediaFireDownloader(HTTPDownloader):
                     raise ContentNotFoundError(f"HTTP 404 for {url}")
                 if resp.status != 200:
                     raise ResolveError(f"MediaFire HTTP {resp.status}")
-                return await resp.text(errors="replace")
+                return await read_text(resp)
         except (TimeoutError, aiohttp.ClientError) as exc:
             raise ResolveError(str(exc)) from exc
 

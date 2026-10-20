@@ -73,3 +73,10 @@ def test_success_text():
 
 def test_caption():
     assert "1.0 KB" in fmt.caption_for(_file())
+
+
+def test_mtproto_upload_progress_is_not_labeled_downloading():
+    text = fmt.upload_progress_text(filename="<large>.zip", sent=1024, total=2048)
+    assert "Uploading" in text and "50%" in text
+    assert "Downloading" not in text
+    assert "&lt;large&gt;.zip" in text

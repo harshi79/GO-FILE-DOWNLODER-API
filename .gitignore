@@ -230,3 +230,10 @@ venv/
 *.part
 Downloads/
 tmp/
+
+# Telegram authorization files must never enter Git (MTProto uses MemorySession).
+*.session
+*.session-journal
+
+# Local temporary download data
+downloads/

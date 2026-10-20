@@ -8,27 +8,43 @@ the file. Providers live in :mod:`gofile_bot.downloaders`.
 
 from __future__ import annotations
 
+import html
 import logging
 import re
+from urllib.parse import urlparse
 
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from gofile_bot.config import MAX_FOLDER_FILES
+from gofile_bot.config import (
+    HARD_MAX_FILE_BYTES,
+    MAX_FILE_BYTES,
+    MAX_FOLDER_FILES,
+    MAX_ZIP_BYTES,
+)
 from gofile_bot.downloaders.base import DownloaderRegistry
 from gofile_bot.errors import (
     BotError,
+    FileTooLargeError,
     InvalidURLError,
     JobBusyError,
     JobExpiredError,
     UnsupportedURLError,
+    ZipSafetyError,
 )
-from gofile_bot.gofile.models import RemoteFolder
+from gofile_bot.gofile.models import (
+    RemoteFile,
+    RemoteFolder,
+    bounded_content,
+    collect_files,
+)
 from gofile_bot.gofile.urls import parse_share
 from gofile_bot.services.jobs import Job, JobStore
+from gofile_bot.services.resources import cancelable
 from gofile_bot.services.transfer import TransferService
+from gofile_bot.services.zip_extract import is_zip
 from gofile_bot.telegram import formatting as fmt
-from gofile_bot.telegram.keyboards import download_keyboard
+from gofile_bot.telegram.keyboards import download_keyboard, link_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +63,8 @@ START_TEXT = (
     "Password-protected GoFile shares:\n"
     "/gofile https://gofile.io/d/xxxxxx mypassword\n"
     "\n"
+    "📦 Send a ZIP (≤20 MB) or use /extract <url> to unpack it safely.\n"
+    "Use /status to check the queue and /cancel to stop your job.\n\n"
     "Type /help for details, /supported for all sources.\n"
     "\n"
     f"{fmt.MADE_BY}"
@@ -60,7 +78,11 @@ HELP_TEXT = (
     "/help — this message\n"
     "/download &lt;url&gt; — download from any supported link (alias /dl)\n"
     "/gofile &lt;url&gt; [password] — GoFile shares\n"
+    "/links &lt;url&gt; [password] — fresh browser download links\n"
     "/supported — every source I can download from\n"
+    "/extract &lt;url&gt; — extract a ZIP (≤20 MB input and output)\n"
+    "/status — queue, limits and current job\n"
+    "/cancel — cancel your queued or running job\n"
     "/ping — check I'm alive\n"
     "\n"
     "<b>How it works</b>\n"
@@ -74,10 +96,12 @@ HELP_TEXT = (
     "\n"
     "<b>Good to know</b>\n"
     "• Only public links work — private/login-only content can't be opened.\n"
-    "• Files must fit Telegram's upload limit (about 50 MB).\n"
+    "• Upload limit: {upload_limit} per file. /links avoids Telegram uploads.\n"
     f"• Folder shares: the first {MAX_FOLDER_FILES} sendable files are delivered.\n"
     "• You can tap Cancel while a download is running.\n"
-    "• Passwords are used to open the share and are never stored.\n"
+    "• ZIPs: at most 20 MB compressed AND expanded, 20 files; no nested extraction.\n"
+    "• One active transfer globally; a bounded queue protects the server.\n"
+    "• Passwords stay only in the temporary in-memory job (not on disk).\n"
     "\n"
     f"{fmt.MADE_BY}"
 )
@@ -105,10 +129,42 @@ _TRAILING_PUNCT = ").,]}'\""
 #: Extensions that make a pasted generic URL "look like a file" (so random
 #: web-page links pasted in chat don't trigger the direct downloader).
 _FILE_EXTENSIONS = (
-    ".7z", ".apk", ".avi", ".bin", ".bz2", ".csv", ".dmg", ".doc", ".docx",
-    ".epub", ".exe", ".flac", ".gif", ".gz", ".iso", ".jpg", ".jpeg", ".m4a",
-    ".mkv", ".mov", ".mp3", ".mp4", ".msi", ".ogg", ".pdf", ".png", ".ppt",
-    ".pptx", ".rar", ".tar", ".wav", ".webm", ".webp", ".xls", ".xlsx", ".zip",
+    ".7z",
+    ".apk",
+    ".avi",
+    ".bin",
+    ".bz2",
+    ".csv",
+    ".dmg",
+    ".doc",
+    ".docx",
+    ".epub",
+    ".exe",
+    ".flac",
+    ".gif",
+    ".gz",
+    ".iso",
+    ".jpg",
+    ".jpeg",
+    ".m4a",
+    ".mkv",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".msi",
+    ".ogg",
+    ".pdf",
+    ".png",
+    ".ppt",
+    ".pptx",
+    ".rar",
+    ".tar",
+    ".wav",
+    ".webm",
+    ".webp",
+    ".xls",
+    ".xlsx",
+    ".zip",
 )
 
 
@@ -186,7 +242,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
-        await update.message.reply_html(HELP_TEXT)
+        settings = _bot_data(context).get("settings")
+        limit = settings.max_file_bytes if settings else MAX_FILE_BYTES
+        await update.message.reply_html(
+            HELP_TEXT.replace("{upload_limit}", fmt.human_size(limit))
+        )
 
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -199,11 +259,114 @@ async def supported_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     lines = ["📥 <b>Supported sources</b>\n"]
     for provider in _downloaders(context).all():
-        lines.append(f"• <b>{fmt.esc(provider.label)}</b> — {fmt.esc(provider.description)}")
+        lines.append(
+            f"• <b>{fmt.esc(provider.label)}</b> — {fmt.esc(provider.description)}"
+        )
         for example in provider.examples:
             lines.append(f"   <code>{fmt.esc(example)}</code>")
     lines.append("\nJust paste a link, or use /download &lt;url&gt;.")
     await update.message.reply_html("\n".join(lines))
+
+
+async def _dispatch_metadata(update, context, factory):
+    async def safe_request():
+        try:
+            import asyncio
+
+            async with asyncio.timeout(40):
+                await factory()
+        except BotError as exc:
+            await update.message.reply_text(exc.user_message)
+        except TimeoutError:
+            await update.message.reply_text(
+                "⌛ That request timed out. Please try again shortly."
+            )
+
+    tasks = _bot_data(context).get("metadata_tasks")
+    if tasks is None:  # Legacy embeds/tests: same flow without background scheduling.
+        await safe_request()
+        return
+    try:
+        tasks.submit(
+            update.effective_user.id, safe_request, context.application.create_task
+        )
+    except BotError as exc:
+        await update.message.reply_text(exc.user_message)
+
+
+async def links_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await _dispatch_metadata(update, context, lambda: _links_flow(update, context))
+
+
+async def _links_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Resolve fresh links without downloading to the server or uploading to Telegram."""
+    message = update.message
+    if message is None:
+        return
+    try:
+        url, password = parse_command_args(message.text or "")
+    except BotError:
+        await message.reply_text(
+            "Use /links <url> [password] to get fresh download links."
+        )
+        return
+    provider = _downloaders(context).find(url)
+    if provider is None:
+        await message.reply_text(UnsupportedURLError.user_message)
+        return
+    try:
+        content = bounded_content(await provider.resolve(url, password=password))
+    except BotError as exc:
+        await message.reply_text(exc.user_message)
+        return
+    except Exception:
+        logger.exception("link resolution failed via %s", provider.name)
+        await message.reply_text(
+            "⚠️ Couldn't fetch download links. Please try again later."
+        )
+        return
+    files = collect_files(content)
+    delivered = 0
+    for file in files:
+        try:
+            parsed = urlparse(file.link)
+            safe = (
+                parsed.scheme in ("http", "https")
+                and parsed.hostname
+                and not parsed.username
+                and not parsed.password
+            )
+        except ValueError:
+            safe = False
+        if not safe:
+            continue
+        # Separate bounded messages keep a folder from exceeding Telegram's
+        # 4096-character limit. No account cookies or API tokens are exposed.
+        href = html.escape(file.link, quote=True)
+        text = (
+            f"📄 <b>{fmt.esc(file.name[:200])}</b> · {fmt.human_size(file.size)}\n"
+            f'<a href="{href}">Download file</a>'
+        )
+        if len(text) > 3800:
+            continue
+        await message.reply_html(
+            text, disable_web_page_preview=True, reply_markup=link_keyboard(file.link)
+        )
+        delivered += 1
+        if delivered >= MAX_FOLDER_FILES:
+            break
+    if not delivered:
+        await message.reply_text(
+            "⚠️ No browser download links are available for this share."
+        )
+        return
+    await message.reply_text(
+        "ℹ️ These are fresh host-provided links, not permanent hosted copies. "
+        "They may expire or require the host's browser session (especially GoFile). "
+        "If a link is denied, open the original share in your browser or use /download. "
+        "Run /links again to refresh. At most 10 links are shown."
+    )
 
 
 async def gofile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -218,8 +381,12 @@ async def gofile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await message.reply_text(exc.user_message)
         return
     await _start_link_flow(
-        update, context, url, password=password,
-        provider_name="gofile", content_id=content_id,
+        update,
+        context,
+        url,
+        password=password,
+        provider_name="gofile",
+        content_id=content_id,
     )
 
 
@@ -236,7 +403,113 @@ async def download_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _start_link_flow(update, context, url, password=password)
 
 
-async def _start_link_flow(
+async def extract_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    try:
+        url, password = parse_command_args(update.message.text or "")
+    except BotError:
+        await update.message.reply_text(
+            "Use /extract <ZIP-url> [share-password], or send a ZIP document (≤20 MB)."
+        )
+        return
+    await _start_link_flow(update, context, url, password=password, action="extract")
+
+
+async def uploaded_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if not message or not message.document:
+        return
+    document = message.document
+    file = RemoteFile(
+        id=document.file_id,
+        name=(document.file_name or "archive.zip")[:256],
+        size=document.file_size or 0,
+        mimetype=document.mime_type or "application/zip",
+        link="",
+    )
+    if not is_zip(file):
+        await message.reply_text(
+            "📦 Send a .zip file, or /extract <ZIP-url>. Other archives aren't supported."
+        )
+        return
+    if file.size > MAX_ZIP_BYTES:
+        await message.reply_text(ZipSafetyError.user_message)
+        return
+    jobs = _jobs(context)
+    if update.effective_user and jobs.active_for_user(update.effective_user.id):
+        await message.reply_text(JobBusyError.user_message)
+        return
+    status = await message.reply_text(
+        "📦 ZIP ready. Extraction checks size, paths and file count before sending anything."
+    )
+    try:
+        job = jobs.create(
+            user_id=update.effective_user.id,
+            chat_id=message.chat_id,
+            status_message_id=status.message_id,
+            provider="telegram",
+        )
+    except BotError as exc:
+        await message.reply_text(exc.user_message)
+        return
+    job.content = file
+    job.action = "extract"
+    await _status(context, job).edit(
+        fmt.info_text(file, "Uploaded ZIP")
+        + "\n\nSafety limits: 20 MB archive + 20 MB total extracted; at most 20 files.",
+        download_keyboard(job.id, extract_only=True),
+        force=True,
+    )
+
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    service = _transfer(context)
+    job = _jobs(context).active_for_user(update.effective_user.id)
+    state = service.snapshot(job)
+    own = f"Your job: {job.phase}." if job else "You have no queued/running transfer."
+    if state["position"]:
+        own += f" Queue position: {state['position']}."
+    settings = _bot_data(context).get("settings")
+    mode = (
+        "MTProto"
+        if settings and settings.enable_mtproto
+        else "Local API"
+        if settings and settings.telegram_api_url
+        else "Cloud API"
+    )
+    delivery_limit = settings.max_file_bytes if settings else MAX_FILE_BYTES
+    await update.message.reply_text(
+        f"Mode: {mode} · configured delivery cap: {fmt.human_size(delivery_limit)}\n"
+        f"📊 Active: {state['active']} · Waiting: {state['queued']} · Capacity: {state['capacity']} jobs\n"
+        f"{own}\n📦 ZIP: 20 MB input + output cap. Hard download ceiling: 2,000,000,000 bytes."
+    )
+
+
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    job = _jobs(context).active_for_user(update.effective_user.id)
+    if job:
+        job.cancel_event.set()
+        await update.message.reply_text(
+            "🛑 Stopping your job and cleaning up temporary files…"
+        )
+    else:
+        await update.message.reply_text(
+            "You have no queued or running transfer to cancel."
+        )
+
+
+async def _start_link_flow(update, context, url, **kwargs):
+    await _dispatch_metadata(
+        update, context, lambda: _resolve_link_flow(update, context, url, **kwargs)
+    )
+
+
+async def _resolve_link_flow(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     url: str,
@@ -244,6 +517,7 @@ async def _start_link_flow(
     password: str | None = None,
     provider_name: str | None = None,
     content_id: str = "",
+    action: str = "download",
 ) -> None:
     """Resolve *url* with its provider and show the info card."""
     message = update.message
@@ -252,9 +526,7 @@ async def _start_link_flow(
 
     jobs = _jobs(context)
     registry = _downloaders(context)
-    provider = (
-        registry.get(provider_name) if provider_name else registry.find(url)
-    )
+    provider = registry.get(provider_name) if provider_name else registry.find(url)
     if provider is None:
         await message.reply_text(UnsupportedURLError.user_message)
         return
@@ -275,9 +547,28 @@ async def _start_link_flow(
         source_url=url,
     )
 
+    job.action = action
+    job.running = True
+    job.phase = "resolving"
     status_helper = _status(context, job)
     try:
-        content = await provider.resolve(url, password=password)
+        content = bounded_content(
+            await cancelable(
+                provider.resolve(url, password=password), job.cancel_event, 30
+            )
+        )
+        settings = _bot_data(context).get("settings")
+        limit = min(
+            settings.max_file_bytes if settings else MAX_FILE_BYTES, HARD_MAX_FILE_BYTES
+        )
+        if isinstance(content, RemoteFile) and content.size > limit:
+            raise FileTooLargeError(size=content.size, limit=limit)
+        if action == "extract" and (
+            not isinstance(content, RemoteFile)
+            or not is_zip(content)
+            or content.size > MAX_ZIP_BYTES
+        ):
+            raise ZipSafetyError()
         job.content = content
     except BotError as exc:
         logger.info(
@@ -294,6 +585,9 @@ async def _start_link_flow(
             force=True,
         )
         return
+    finally:
+        job.running = False
+        job.phase = "ready" if job.content is not None else "failed"
 
     extra = ""
     if isinstance(content, RemoteFolder) and content.file_count > MAX_FOLDER_FILES:
@@ -303,7 +597,13 @@ async def _start_link_flow(
         )
     await status_helper.edit(
         fmt.info_text(content, provider.label) + extra,
-        download_keyboard(job.id),
+        download_keyboard(
+            job.id,
+            can_extract=isinstance(content, RemoteFile)
+            and is_zip(content)
+            and content.size <= MAX_ZIP_BYTES,
+            extract_only=action == "extract",
+        ),
         force=True,
     )
 
@@ -318,6 +618,14 @@ def _status(context: ContextTypes.DEFAULT_TYPE, job: Job):
 # Callbacks
 # ---------------------------------------------------------------------------
 async def download_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _action_cb(update, context, "download")
+
+
+async def extract_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _action_cb(update, context, "extract")
+
+
+async def _action_cb(update, context, action):
     query = update.callback_query
     if query is None:
         return
@@ -336,15 +644,44 @@ async def download_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    if job.running:
+    active = _jobs(context).active_for_user(user_id)
+    if job.running or (active is not None and active.id != job.id):
         await query.answer(text=JobBusyError.user_message, show_alert=True)
         return
 
-    await query.answer(text="Starting download…")
+    if job.content is None:
+        await query.answer(
+            text="File information isn't ready. Send the link again.", show_alert=True
+        )
+        return
+    if action == "extract" and (
+        not isinstance(job.content, RemoteFile)
+        or not is_zip(job.content)
+        or job.content.size > MAX_ZIP_BYTES
+    ):
+        await query.answer(
+            text="ZIP extraction is limited to 20 MB input and output.", show_alert=True
+        )
+        return
+    job.action = action
+    service = _transfer(context)
+    if isinstance(service, TransferService) and hasattr(
+        context.application, "create_task"
+    ):
+        try:
+            service.submit(job, context.application.create_task)
+        except BotError as exc:
+            await query.answer(text=exc.user_message, show_alert=True)
+            return
+        await query.answer(text="Request accepted. /status shows your queue position.")
+        return
 
+    # Reserve the user before the first await, so rapid presses on two old
+    # cards cannot start simultaneous transfers for the same user.
     job.cancel_event.clear()
     job.running = True
     try:
+        await query.answer(text="Starting download…")
         await _transfer(context).run(job)
     except Exception:  # pragma: no cover - transfer.run already contains errors
         logger.exception("transfer crashed for job %s", job.id)
@@ -364,9 +701,7 @@ async def cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user_id = query.from_user.id if query.from_user else 0
     if job.user_id != user_id:
-        await query.answer(
-            text="This button isn't for you.", show_alert=True
-        )
+        await query.answer(text="This button isn't for you.", show_alert=True)
         return
 
     job.cancel_event.set()

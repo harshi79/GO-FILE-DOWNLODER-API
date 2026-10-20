@@ -19,3 +19,7 @@ services:
         value: 12af056dacea0b
       - key: ENABLE_DIRECT_DOWNLOADS
         value: "true" # set "false" to accept only known file hosts
+      - key: ENABLE_MTPROTO
+        value: "false" # change to "true" and add API_ID/API_HASH for ~2 GB files
+      # Optional big-file mode: add API_ID and API_HASH privately in the
+      # service's Environment dashboard, then redeploy. No extra server needed.

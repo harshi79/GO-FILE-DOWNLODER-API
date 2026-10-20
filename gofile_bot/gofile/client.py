@@ -25,17 +25,18 @@ from pathlib import Path
 
 import aiohttp
 
+from gofile_bot.metadata import read_json
+
 from gofile_bot.config import (
     API_CONCURRENCY,
     API_MAX_ATTEMPTS,
-    DOWNLOAD_CHUNK_SIZE,
-    DOWNLOAD_SOCK_READ_TIMEOUT,
     GOFILE_ACCOUNTS_URL,
     GOFILE_CONTENT_URL,
     GOFILE_LOCALE,
     GOFILE_USER_AGENT,
     GOFILE_WEB_BASE,
     METADATA_TIMEOUT,
+    MAX_RESOLVED_FILES,
     RATE_LIMIT_BACKOFF_BASE,
     Settings,
 )
@@ -115,7 +116,9 @@ class GoFileClient:
     async def start(self) -> None:
         if self._session is None:
             self._session = aiohttp.ClientSession(
-                headers={"User-Agent": GOFILE_USER_AGENT, "Accept": "*/*"},
+                auto_decompress=False,
+                skip_auto_headers={"Accept-Encoding"},
+                headers={"User-Agent": GOFILE_USER_AGENT, "Accept": "*/*", "Accept-Encoding": "identity"},
                 timeout=aiohttp.ClientTimeout(total=METADATA_TIMEOUT),
             )
 
@@ -147,7 +150,7 @@ class GoFileClient:
         for attempt in range(1, 3):
             try:
                 async with self.session.post(GOFILE_ACCOUNTS_URL) as resp:
-                    payload = await resp.json(content_type=None)
+                    payload = await read_json(resp)
             except (TimeoutError, aiohttp.ClientError) as exc:
                 logger.warning("guest account attempt %d failed: %s", attempt, exc)
                 if attempt == 2:
@@ -229,7 +232,7 @@ class GoFileClient:
                     params=params,
                     headers=self._api_headers(account_token, window_offset),
                 ) as resp:
-                    payload = await resp.json(content_type=None)
+                    payload = await read_json(resp)
             except (TimeoutError, aiohttp.ClientError) as exc:
                 if attempt < API_MAX_ATTEMPTS:
                     logger.warning("metadata fetch attempt %d failed: %s", attempt, exc)
@@ -270,19 +273,24 @@ class GoFileClient:
         raise RateLimitedError("exhausted retries")
 
     async def _parse_tree(
-        self, data: dict, password: str | None, *, depth: int, max_depth: int
+        self, data: dict, password: str | None, *, depth: int, max_depth: int, budget: list[int] | None = None
     ) -> Content:
         check_password_state(data, password_provided=password is not None)
 
         if data.get("type") != "folder":
             return parse_file(data)
 
+        if budget is None:
+            budget = [MAX_RESOLVED_FILES]
         children: list[Content] = []
         raw_children = data.get("children") or {}
         entries = (
             list(raw_children.values()) if isinstance(raw_children, dict) else list(raw_children)
         )
         for entry in entries:
+            if budget[0] <= 0:
+                break
+            budget[0] -= 1
             if not isinstance(entry, dict):
                 continue
             if entry.get("type") == "folder" and depth < max_depth:
@@ -293,7 +301,7 @@ class GoFileClient:
                         allow_token_refresh=False,
                     )
                     child = await self._parse_tree(
-                        nested, password, depth=depth + 1, max_depth=max_depth
+                        nested, password, depth=depth + 1, max_depth=max_depth, budget=budget
                     )
                 except GoFileUnavailableError:
                     logger.warning("could not expand subfolder %s", entry.get("id"))
@@ -332,45 +340,17 @@ class GoFileClient:
             "User-Agent": GOFILE_USER_AGENT,
             "Referer": f"{GOFILE_WEB_BASE}/",
         }
-        timeout = aiohttp.ClientTimeout(
-            total=None, connect=30, sock_read=DOWNLOAD_SOCK_READ_TIMEOUT
-        )
+        # Follow redirects ourselves: aiohttp would otherwise forward the
+        # explicit account cookie to an arbitrary redirect target.
+        from gofile_bot.downloaders.net import stream_to_file
+        from gofile_bot.errors import RemoteDownloadError
 
-        part_path = dest.with_suffix(dest.suffix + ".part")
-        written = 0
         try:
-            async with self.session.get(
-                file.link, headers=headers, timeout=timeout
-            ) as resp:
-                if resp.status != 200:
-                    raise DownloadError(f"download HTTP {resp.status} for {file.link}")
-
-                total: int | None = file.size or None
-                content_length = resp.headers.get("Content-Length")
-                if content_length and content_length.isdigit():
-                    total = int(content_length)
-                    if total > max_bytes:
-                        raise FileTooLargeError(size=total, limit=max_bytes)
-
-                with part_path.open("wb") as fh:
-                    async for chunk in resp.content.iter_chunked(DOWNLOAD_CHUNK_SIZE):
-                        if cancel_event is not None and cancel_event.is_set():
-                            raise JobCancelled()
-                        written += len(chunk)
-                        if written > max_bytes:
-                            raise FileTooLargeError(size=written, limit=max_bytes)
-                        fh.write(chunk)
-                        if progress is not None:
-                            await progress(written, total)
-
-            part_path.replace(dest)
-            logger.info("downloaded %s (%d bytes)", file.name, written)
-            return written
-        except (TimeoutError, aiohttp.ClientError) as exc:
-            raise DownloadError(str(exc)) from exc
-        finally:
-            if part_path.exists():
-                try:
-                    part_path.unlink()
-                except OSError:  # pragma: no cover - best effort cleanup
-                    pass
+            await stream_to_file(
+                self.session, file.link, dest, max_bytes=max_bytes,
+                progress=progress, cancel_event=cancel_event, headers=headers,
+                allowed_hosts=("gofile.io",), expected_size=file.size or None,
+            )
+        except RemoteDownloadError as exc:
+            raise DownloadError(exc.detail) from exc
+        return dest.stat().st_size

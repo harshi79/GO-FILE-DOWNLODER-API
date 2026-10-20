@@ -468,3 +468,14 @@ def test_parse_size_text():
     assert parse_size_text("900 KB") == 900 * 1024
     assert parse_size_text("no size here") == 0
     assert parse_size_text(None) == 0
+
+
+async def test_probe_rejects_redirect_loop():
+    from gofile_bot.downloaders.net import probe_url
+
+    url = "https://example.com/loop"
+    with aioresponses() as m:
+        m.head(url, status=302, headers={"Location": url}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(ResolveError, match="too many redirects"):
+                await probe_url(session, url, public_only=True, resolver=_public_resolver)

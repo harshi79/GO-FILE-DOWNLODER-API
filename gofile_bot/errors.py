@@ -136,7 +136,7 @@ class FileTooLargeError(BotError):
             parts = ["⚠️ This file is too big for Telegram uploads"]
             if size is not None and limit is not None:
                 parts.append(f"({human_size(size)} > {human_size(limit)})")
-            parts.append("Try a smaller file.")
+            parts.append("Use /links <url> for host download links, or try a smaller file.")
             super().__init__(detail, user_message=" ".join(parts))
         self.size = size
         self.limit = limit
@@ -144,8 +144,8 @@ class FileTooLargeError(BotError):
 
 class TelegramUploadError(BotError):
     user_message = (
-        "⚠️ Telegram refused the upload (the file may exceed the 50 MB Bot API "
-        "limit). Try a smaller file."
+        "⚠️ Telegram refused the upload. Ask the bot owner to check the active "
+        "upload transport and logs, or use /links <url> to download from the host."
     )
 
 
@@ -162,3 +162,11 @@ class JobBusyError(BotError):
 
 class JobExpiredError(BotError):
     user_message = "⌛ This button has expired. Send the link again."
+
+
+class ServiceBusyError(BotError):
+    user_message = "⏳ The bot is at its safe capacity. Please try again shortly; existing jobs are protected."
+
+
+class ZipSafetyError(BotError):
+    user_message = "⚠️ ZIP rejected. Both the archive and extracted contents must be at most 20 MB, with at most 20 files."
