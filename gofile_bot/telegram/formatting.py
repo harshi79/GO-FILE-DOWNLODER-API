@@ -129,6 +129,17 @@ def success_text(content: Content, sent: list[str] | None = None) -> str:
     )
 
 
+def too_big_note(size: int, limit: int) -> str:
+    """Explain an upload-limit rejection before the user taps a dead button."""
+    return (
+        f"\n\n⚠️ This file is <b>{human_size(size)}</b>, larger than this bot's "
+        f"<b>{human_size(limit)}</b> Telegram upload limit.\n"
+        "Use <code>/links &lt;your link&gt;</code> to get the host's download "
+        "link, or ask the bot owner to enable MTProto / a Local Bot API server "
+        "(up to 2 GB)."
+    )
+
+
 def folder_note_text(content: RemoteFolder, *, skipped: list[str]) -> str:
     if not skipped:
         return ""

@@ -23,9 +23,9 @@ resource smoke test below; this is not a promise of unlimited throughput.
 | Source | Example | How it downloads | Notes |
 | --- | --- | --- | --- |
 | **GoFile** | `gofile.io/d/xxxxxx` | GoFile API (guest token or your `GOFILE_API_TOKEN`) | Files & folders; `/gofile <url> <password>` for protected shares |
-| **Google Drive** | `drive.google.com/file/d/…/view` | Public `uc?export=download` flow (incl. large-file confirm form) | Docs → PDF, Sheets → XLSX, Slides → PPTX. No folders |
+| **Google Drive** | `drive.google.com/file/d/…/view` | `drive.usercontent.google.com/download?…&confirm=t` (large-file confirm form handled) | Docs → PDF, Sheets → XLSX, Slides → PPTX. No folders |
 | **Dropbox** | `dropbox.com/scl/fi/…?dl=0` | `dl=1` force-download form | Shared folders arrive as Dropbox's own `.zip` |
-| **OneDrive / SharePoint** | `1drv.ms/…`, `*.sharepoint.com/:b:/…` | Graph shares endpoint / classic `download?cid=…` form | "Anyone with the link" only. No folders |
+| **OneDrive / SharePoint** | `1drv.ms/…`, `*.sharepoint.com/:b:/…` | Anonymous OneDrive shares API (the same flow the web client uses) / `?download=1` | "Anyone with the link" only. No folders |
 | **Pixeldrain** | `pixeldrain.com/u/…`, `/l/…` | Official public API | Files and lists |
 | **MediaFire** | `mediafire.com/file/…/file` | Reads the public download button on the file page | Single files (no folders) |
 | **Internet Archive** | `archive.org/details/…` | Public metadata API | Item pages resolve to their file list |
@@ -49,6 +49,9 @@ credentials and never bypasses access controls).
 
 - **Paste any supported link** (no command needed) or use `/download <url>`.
 - Shows **name, size, type and source** with an inline **「 DOWNLOAD 」** button.
+- Files that exceed the active Telegram upload limit are flagged on that
+  card (no dead Download button) with a `/links` hint, instead of failing
+  only after the whole download has run.
 - On demand: streams the file to a temporary directory (live progress in the
   same status message) and sends it as a Telegram document.
 - **Folder/list shares** (GoFile, Pixeldrain lists, archive.org items) deliver
@@ -550,7 +553,12 @@ or use a command:
 - **Other hosts:** only their public, logged-out flows are used — official
   APIs where they exist (Pixeldrain, archive.org), the public share/download
   endpoints (Google Drive, Dropbox, OneDrive), or the public download button
-  (MediaFire).
+  (MediaFire). Google Drive now downloads through
+  `drive.usercontent.google.com` with `confirm=t`, so files above the
+  virus-scan threshold no longer stop at an HTML interstitial. OneDrive
+  personal shares use the anonymous *Badger* token + shares API that the
+  OneDrive web client itself uses; SharePoint links use `?download=1`.
+  Neither flow signs in to a Microsoft or Google account.
 - **SSRF:** every provider pins downloads to its own host allowlist and
   re-validates each redirect hop. The direct-link provider additionally
   requires the host to resolve *only* to globally-routable IPs (private,
@@ -672,8 +680,9 @@ against mocked transports. No live Telegram or file-host calls are made.
 | "That link opens a web page, not a direct file" | The URL isn't a direct file. Use a supported host link instead. |
 | "private or needs a login" | Share the file as "Anyone with the link", then retry. |
 | Drive/OneDrive *folder* rejected | Folders aren't supported there — link a single file. |
+| OneDrive says it "needs a Microsoft sign-in" | The link isn't shared as *Anyone with the link* (or its 90-day anonymous share expired). Re-share the file publicly and send the new link. |
 | "GoFile is rate-limiting requests" | Wait a few minutes; heavy users can set `GOFILE_API_TOKEN`. |
-| "too big for Telegram uploads" | Configure built-in MTProto mode (recommended), Local Bot API mode, or use `/links <url>` (see Large files). |
+| "too big for Telegram uploads" | The info card now says so before you tap anything and hides the Download button. Configure built-in MTProto mode (recommended), Local Bot API mode, or use `/links <url>` (see Large files). |
 | "MTProto bot login failed" | Check `ENABLE_MTPROTO`, `API_ID`, `API_HASH`, the existing bot token, and outbound Telegram MTProto connectivity. |
 | "uploader hasn't seen this chat yet" | Send `/start` and then the link again; the in-memory peer cache resets on restart. |
 | "This button has expired" | Jobs live in memory for 24 h (and across restarts they reset) — send the link again. |

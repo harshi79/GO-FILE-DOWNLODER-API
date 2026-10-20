@@ -22,6 +22,8 @@ from gofile_bot.downloaders.base import host_matches
 from gofile_bot.downloaders.direct import DirectDownloader, is_web_page
 from gofile_bot.downloaders.dropbox import to_download_url
 from gofile_bot.downloaders.gdrive import (
+    GoogleDriveDownloader,
+    direct_download_url,
     export_download_url,
     extract_drive_ref,
     parse_confirm_form,
@@ -38,17 +40,21 @@ from gofile_bot.downloaders.net import (
     validate_public_url,
 )
 from gofile_bot.downloaders.onedrive import (
+    OneDriveDownloader,
     download_candidates,
+    download_param_url,
     encode_sharing_url,
+    extract_download_urls,
     graph_content_url,
     live_download_url,
+    looks_like_folder,
 )
 from gofile_bot.downloaders.pixeldrain import (
     extract_pixeldrain_ref,
     parse_file_info,
     parse_list_info,
 )
-from gofile_bot.errors import RemoteDownloadError, ResolveError
+from gofile_bot.errors import PrivateContentError, RemoteDownloadError, ResolveError
 from gofile_bot.gofile.models import RemoteFile, RemoteFolder
 
 
@@ -479,3 +485,294 @@ async def test_probe_rejects_redirect_loop():
         async with aiohttp.ClientSession() as session:
             with pytest.raises(ResolveError, match="too many redirects"):
                 await probe_url(session, url, public_only=True, resolver=_public_resolver)
+
+
+
+def test_onedrive_download_param_url_preserves_query():
+    assert download_param_url("https://1drv.ms/u/s!AB?e=x") == (
+        "https://1drv.ms/u/s!AB?e=x&download=1"
+    )
+    assert download_param_url("https://contoso.sharepoint.com/:b:/g/x") == (
+        "https://contoso.sharepoint.com/:b:/g/x?download=1"
+    )
+    # Already forced: leave it alone.
+    url = "https://contoso.sharepoint.com/:b:/g/x?download=1"
+    assert download_param_url(url) == url
+
+
+def test_onedrive_extract_download_urls_from_escaped_json():
+    page = (
+        '{"@content.downloadUrl":"https:\\/\\/my.microsoftpersonalcontent.com'
+        '\\/personal\\/abc\\/_layouts\\/15\\/download.aspx?UniqueId=1'
+        '\\u0026tempauth=TOKEN"}'
+    )
+    assert extract_download_urls(page) == [
+        "https://my.microsoftpersonalcontent.com/personal/abc/_layouts/15/"
+        "download.aspx?UniqueId=1&tempauth=TOKEN"
+    ]
+    # Non-Microsoft hosts are never trusted, even if the page contains them.
+    assert extract_download_urls(
+        '{"downloadUrl":"https://evil.example/download.aspx"}'
+    ) == []
+
+
+def test_onedrive_folder_detection():
+    assert looks_like_folder("https://1drv.ms/f/s!AbCdEf")
+    assert looks_like_folder("https://contoso.sharepoint.com/:f:/g/personal/x/abc")
+    assert not looks_like_folder("https://1drv.ms/u/s!AbCdEf")
+
+
+async def test_onedrive_personal_resolves_via_badger_api():
+    provider = OneDriveDownloader()
+    share = "https://1drv.ms/u/s!AbCdEf"
+    page = "https://onedrive.live.com/?cid=AAA&id=AAA!123&authkey=!key"
+    direct = (
+        "https://my.microsoftpersonalcontent.com/personal/AAA/_layouts/15/"
+        "download.aspx?UniqueId=1&tempauth=abc"
+    )
+    payload = {
+        "@content.downloadUrl": direct,
+        "name": "movie.mp4",
+        "size": 1234,
+        "id": "AAA!123",
+        "file": {"mimeType": "video/mp4"},
+    }
+    try:
+        with aioresponses() as m:
+            m.get(share, status=302, headers={"Location": page})
+            m.get(
+                re.compile(r"https://onedrive\.live\.com/\?.*"),
+                body="<html><body>share</body></html>",
+                headers={"Content-Type": "text/html"},
+            )
+            m.post(
+                "https://api-badgerp.svc.ms/v1.0/token",
+                payload={"token": "anonymous-token"},
+            )
+            m.get(
+                re.compile(
+                    r"https://my\.microsoftpersonalcontent\.com/_api/v2\.0/"
+                    r"shares/u!.+/driveitem.*"
+                ),
+                payload=payload,
+            )
+            content = await provider.resolve(share)
+    finally:
+        await provider.close()
+
+    assert isinstance(content, RemoteFile)
+    assert content.name == "movie.mp4"
+    assert content.size == 1234
+    assert content.link == direct
+    assert content.mimetype == "video/mp4"
+
+
+async def test_onedrive_business_uses_download_param_and_accepts_206():
+    provider = OneDriveDownloader()
+    share = "https://contoso.sharepoint.com/:b:/g/personal/x/abc?e=xyz"
+    forced = share + "&download=1"
+    final = "https://contoso.sharepoint.com/_layouts/15/download.aspx?x=1"
+    try:
+        with aioresponses() as m:
+            m.get(
+                share,
+                body="<html>share page</html>",
+                headers={"Content-Type": "text/html"},
+            )
+            m.get(
+                re.compile(r"https://contoso\.sharepoint\.com/_api/v2\.0/shares/.+"),
+                status=401,
+            )
+            m.head(forced, status=405)
+            m.get(forced, status=302, headers={"Location": final})
+            m.get(
+                final,
+                status=206,
+                body=b"x",
+                headers={
+                    "Content-Type": "application/pdf",
+                    "Content-Range": "bytes 0-0/999",
+                    "Content-Disposition": 'attachment; filename="report.pdf"',
+                },
+            )
+            content = await provider.resolve(share)
+    finally:
+        await provider.close()
+
+    assert isinstance(content, RemoteFile)
+    assert content.name == "report.pdf"
+    assert content.size == 999
+    assert content.link == forced
+
+
+async def test_onedrive_folder_link_rejected_without_network():
+    provider = OneDriveDownloader()
+    try:
+        with pytest.raises(ResolveError):
+            await provider.resolve("https://1drv.ms/f/s!AbCdEf")
+    finally:
+        await provider.close()
+
+
+# ---------------------------------------------------------------------------
+# Google Drive (current drive.usercontent flow)
+# ---------------------------------------------------------------------------
+def test_gdrive_direct_download_url():
+    url = direct_download_url("1AbC_dEf-GhIjK")
+    assert url.startswith("https://drive.usercontent.google.com/download?")
+    assert "confirm=t" in url and "export=download" in url
+
+
+def test_parse_confirm_form_attribute_order_and_action():
+    html = """
+    <form action="https://drive.usercontent.google.com/download" method="get">
+      <input value="1AbC_dEf-GhIjK" name="id">
+      <input value="download" name="export">
+      <input value="t" name="confirm">
+      <input value="abc-123" name="uuid">
+    </form>
+    """
+    url = parse_confirm_form(html)
+    assert url is not None
+    assert url.startswith("https://drive.usercontent.google.com/download?")
+    assert "id=1AbC_dEf-GhIjK" in url
+    assert "confirm=t" in url
+    assert "uuid=abc-123" in url
+    # An attacker-supplied form action is replaced by Google's host.
+    hostile = '<form action="https://evil.example/x"><input name="id" value="abc"></form>'
+    assert parse_confirm_form(hostile).startswith(
+        "https://drive.usercontent.google.com/download?"
+    )
+
+
+async def test_gdrive_resolve_uses_ranged_direct_download():
+    provider = GoogleDriveDownloader()
+    url = "https://drive.google.com/file/d/1AbC_dEf-GhIjK/view"
+    direct = direct_download_url("1AbC_dEf-GhIjK")
+    try:
+        with aioresponses() as m:
+            m.get(
+                direct,
+                status=206,
+                body=b"x",
+                headers={
+                    "Content-Type": "video/mp4",
+                    "Content-Range": "bytes 0-0/5000",
+                    "Content-Disposition": 'attachment; filename="clip.mp4"',
+                },
+            )
+            content = await provider.resolve(url)
+    finally:
+        await provider.close()
+
+    assert isinstance(content, RemoteFile)
+    assert content.name == "clip.mp4"
+    assert content.size == 5000
+    assert content.link == direct
+
+
+async def test_gdrive_resolve_follows_virus_scan_form():
+    provider = GoogleDriveDownloader()
+    url = "https://drive.google.com/file/d/1AbC_dEf-GhIjK/view"
+    page = """
+    <form action="https://drive.usercontent.google.com/download">
+      <input type="hidden" name="id" value="1AbC_dEf-GhIjK">
+      <input type="hidden" name="export" value="download">
+      <input type="hidden" name="confirm" value="t">
+      <input type="hidden" name="uuid" value="u-1">
+    </form>
+    """
+    try:
+        with aioresponses() as m:
+            m.get(
+                re.compile(r"https://drive\.usercontent\.google\.com/download\?.*"),
+                body=page,
+                headers={"Content-Type": "text/html"},
+            )
+            m.get(
+                re.compile(
+                    r"https://drive\.usercontent\.google\.com/download\?.*uuid=u-1"
+                ),
+                body=b"data",
+                headers={
+                    "Content-Type": "application/pdf",
+                    "Content-Length": "4",
+                    "Content-Disposition": 'attachment; filename="doc.pdf"',
+                },
+            )
+            content = await provider.resolve(url)
+    finally:
+        await provider.close()
+
+    assert isinstance(content, RemoteFile)
+    assert content.name == "doc.pdf"
+    assert content.size == 4
+    assert "uuid=u-1" in content.link
+
+
+async def test_stream_to_file_rejects_html_instead_of_file(tmp_path: Path):
+    dest = tmp_path / "out.bin"
+    with aioresponses() as m:
+        m.get(
+            "https://example.com/not-a-file",
+            body="<html><body>Sign in</body></html>",
+            headers={"Content-Type": "text/html"},
+        )
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(RemoteDownloadError):
+                await stream_to_file(
+                    session,
+                    "https://example.com/not-a-file",
+                    dest,
+                    max_bytes=10_000,
+                    public_only=True,
+                    resolver=_public_resolver,
+                )
+    assert not dest.exists()
+
+
+async def test_onedrive_api_folder_item_is_rejected():
+    provider = OneDriveDownloader()
+    share = "https://1drv.ms/u/s!FolderLink"
+    page = "https://onedrive.live.com/?cid=BBB&id=BBB!9"
+    payload = {"id": "BBB!9", "name": "Photos", "folder": {"childCount": 3}}
+    try:
+        with aioresponses() as m:
+            m.get(share, status=302, headers={"Location": page})
+            m.get(
+                re.compile(r"https://onedrive\.live\.com/\?.*"),
+                body="<html>folder</html>",
+                headers={"Content-Type": "text/html"},
+            )
+            m.post(
+                "https://api-badgerp.svc.ms/v1.0/token",
+                payload={"token": "anonymous-token"},
+            )
+            m.get(
+                re.compile(r"https://my\.microsoftpersonalcontent\.com/_api/v2\.0/shares/.+"),
+                payload=payload,
+            )
+            with pytest.raises(ResolveError) as exc_info:
+                await provider.resolve(share)
+    finally:
+        await provider.close()
+    assert "folder" in exc_info.value.user_message.lower()
+
+
+async def test_onedrive_private_link_redirect_is_explained():
+    provider = OneDriveDownloader()
+    share = "https://1drv.ms/u/s!Private"
+    try:
+        with aioresponses() as m:
+            m.get(
+                share,
+                status=302,
+                headers={
+                    "Location": "https://login.microsoftonline.com/common/oauth2/authorize"
+                },
+            )
+            with pytest.raises(PrivateContentError) as exc_info:
+                await provider.resolve(share)
+    finally:
+        await provider.close()
+    assert "sign-in" in exc_info.value.user_message.lower()
