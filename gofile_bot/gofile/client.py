@@ -46,7 +46,6 @@ from gofile_bot.errors import (
     FileTooLargeError,
     GoFileTimeoutError,
     GoFileUnavailableError,
-    JobCancelled,
     PasswordIncorrectError,
     PasswordRequiredError,
     RateLimitedError,

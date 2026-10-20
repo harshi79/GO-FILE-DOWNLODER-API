@@ -146,6 +146,7 @@ class TransferService:
         job_timeout: int = JOB_TIMEOUT,
         mtproto_uploader=None,
         max_pending: int = MAX_PENDING_TRANSFERS,
+        usage=None,
     ) -> None:
         self._bot = bot
         self._max_file_bytes = min(max_file_bytes, HARD_MAX_FILE_BYTES)
@@ -154,6 +155,8 @@ class TransferService:
         self._download_dir = download_dir
         self._job_timeout = job_timeout
         self._mtproto = mtproto_uploader
+        #: Optional UsageStore; kept duck-typed so tests can pass a fake.
+        self._usage = usage
         self._registry = self._as_registry(downloaders)
         self._max_concurrent = max_concurrent
         self._max_pending = max_pending
@@ -305,6 +308,32 @@ class TransferService:
                     self._active.discard(job.id)
                     self._changed.set()
                 job.running = False
+                if admitted:
+                    await self._record_usage(job)
+
+    async def _record_usage(self, job: Job) -> None:
+        """Store one finished job in the usage database (never fatal)."""
+        usage = self._usage
+        if usage is None:
+            return
+        status = (
+            "ok"
+            if job.phase == "complete"
+            else "cancelled"
+            if job.phase == "cancelled"
+            else "failed"
+        )
+        try:
+            await usage.record_download(
+                job.user_id,
+                provider=job.provider,
+                action=job.action,
+                status=status,
+                bytes=job.bytes_sent,
+                duration=max(0.0, time.time() - job.created_at),
+            )
+        except Exception:  # pragma: no cover - stats must never break a transfer
+            logger.debug("could not record usage for job %s", job.id, exc_info=True)
 
     # ------------------------------------------------------------------
     async def _run(self, job: Job, status: StatusMessage, tmpdir: Path) -> None:
@@ -364,13 +393,16 @@ class TransferService:
             )
             if job.action == "extract":
                 return
+            job.bytes_sent += transferred
             remaining -= transferred
             sent.append(file.name)
 
+        note = self._skipped_note(content, files).strip()
         await status.edit(
             fmt.success_text(content, sent) + self._skipped_note(content, files),
             None,
             force=True,
+            rich=fmt.success_rich(content, sent, note),
         )
 
     def _select_files(self, content: Content) -> list[RemoteFile]:
@@ -449,6 +481,7 @@ class TransferService:
         async def progress(received: int, total: int | None) -> None:
             if job.cancelled:
                 raise JobCancelled()
+            elapsed = time.monotonic() - started
             await status.edit(
                 fmt.progress_text(
                     filename=file.name,
@@ -456,9 +489,17 @@ class TransferService:
                     total=total,
                     file_index=file_index if file_count > 1 else None,
                     file_count=file_count if file_count > 1 else None,
-                    elapsed=time.monotonic() - started,
+                    elapsed=elapsed,
                 ),
                 self._cancel_markup(job),
+                rich=fmt.progress_rich(
+                    filename=file.name,
+                    received=received,
+                    total=total,
+                    file_index=file_index if file_count > 1 else None,
+                    file_count=file_count if file_count > 1 else None,
+                    elapsed=elapsed,
+                ),
             )
 
         downloader = self._downloader_for(job)
@@ -485,6 +526,11 @@ class TransferService:
             ),
             self._cancel_markup(job) if self._mtproto else None,
             force=True,
+            rich=fmt.uploading_rich(
+                file.name,
+                file_index=file_index if file_count > 1 else None,
+                file_count=file_count if file_count > 1 else None,
+            ),
         )
         path = Path(actual_path)
         actual_size = path.stat().st_size
@@ -495,6 +541,7 @@ class TransferService:
             await status.edit(
                 fmt.upload_progress_text(filename=file.name, sent=sent, total=total),
                 self._cancel_markup(job),
+                rich=fmt.upload_progress_rich(filename=file.name, sent=sent, total=total),
             )
 
         try:

@@ -237,3 +237,6 @@ tmp/
 
 # Local temporary download data
 downloads/
+
+# Usage database (operator panel)
+data/

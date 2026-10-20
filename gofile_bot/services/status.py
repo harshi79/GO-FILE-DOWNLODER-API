@@ -14,6 +14,7 @@ from telegram import Bot, InlineKeyboardMarkup
 from telegram.error import BadRequest, Forbidden, TelegramError, RetryAfter
 
 from gofile_bot.config import PROGRESS_EDIT_INTERVAL
+from gofile_bot.telegram.rich import RichMessage, edit_rich, rich_supported
 
 logger = logging.getLogger(__name__)
 
@@ -43,21 +44,36 @@ class StatusMessage:
         keyboard: InlineKeyboardMarkup | None = None,
         *,
         force: bool = False,
+        rich: RichMessage | None = None,
     ) -> bool:
         """Edit the status message. Returns True when an edit was sent.
 
         Identical text is skipped. Non-forced edits are throttled to at most
-        one per ``min_interval`` seconds.
+        one per ``min_interval`` seconds. When *rich* is given and the Bot API
+        server supports rich messages, the message is edited with a rich block
+        tree; otherwise *text* (HTML) is used.
         """
         now = time.monotonic()
         if now < self._blocked_until:
             return False
-        if text == self._last_text and keyboard is None:
+        if text == self._last_text and keyboard is None and rich is None:
             return False
         if not force and now - self._last_edit < self._min_interval:
             return False
 
         self._last_edit = now  # Also throttle failures, not just successful edits.
+        if rich is not None and rich_supported(self._bot):
+            if await edit_rich(
+                self._bot,
+                self.chat_id,
+                self.message_id,
+                rich,
+                fallback_html=text,
+                reply_markup=keyboard,
+            ):
+                self._last_text = text
+                return True
+            return False
         try:
             await self._bot.edit_message_text(
                 chat_id=self.chat_id,

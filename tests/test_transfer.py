@@ -193,3 +193,54 @@ def test_tmpdir_cleanup():
     removed = cleanup_stale_tmpdirs(max_age_seconds=-1)
     assert removed >= 1
     assert not d.exists()
+
+
+class FakeUsage:
+    def __init__(self) -> None:
+        self.records: list[tuple[int, dict]] = []
+
+    async def record_download(self, user_id, **kwargs):
+        self.records.append((user_id, kwargs))
+
+
+async def test_successful_transfer_records_usage():
+    bot, gofile = FakeBot(), FakeGofile(payload=b"data")
+    usage = FakeUsage()
+    job = make_job(make_file())
+    await TransferService(bot, gofile, usage=usage).run(job)
+    assert usage.records == [
+        (
+            1,
+            {
+                "provider": "gofile",
+                "action": "download",
+                "status": "ok",
+                "bytes": 4,
+                "duration": usage.records[0][1]["duration"],
+            },
+        )
+    ]
+    assert usage.records[0][1]["duration"] >= 0
+
+
+async def test_failed_transfer_records_failure():
+    bot = FakeBot()
+    gofile = FakeGofile(fail=FileTooLargeError(size=10**9, limit=MAX_FILE_BYTES))
+    usage = FakeUsage()
+    job = make_job(make_file())
+    await TransferService(bot, gofile, usage=usage).run(job)
+    user_id, record = usage.records[0]
+    assert user_id == 1 and record["status"] == "failed"
+    assert record["bytes"] == 0
+
+
+async def test_broken_usage_store_never_breaks_transfer():
+    class Exploding:
+        async def record_download(self, *args, **kwargs):
+            raise RuntimeError("database is gone")
+
+    bot, gofile = FakeBot(), FakeGofile()
+    job = make_job(make_file())
+    await TransferService(bot, gofile, usage=Exploding()).run(job)
+    assert job.phase == "complete"
+    assert bot.sent[0][0] == "doc.pdf"

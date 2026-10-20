@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import time
 
 from telegram import BotCommand
 from telegram.request import HTTPXRequest
@@ -35,7 +36,8 @@ from gofile_bot.services.jobs import JobStore
 from gofile_bot.services.resources import MetadataTasks
 from gofile_bot.downloaders.telegram_zip import TelegramZipDownloader
 from gofile_bot.services.transfer import TransferService, cleanup_stale_tmpdirs
-from gofile_bot.telegram import handlers
+from gofile_bot.services.usage import UsageStore
+from gofile_bot.telegram import admin, handlers
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,7 @@ BOT_COMMANDS = [
     BotCommand("cancel", "Stop your queued or running job"),
     BotCommand("links", "Get fresh browser download links"),
     BotCommand("supported", "List supported sources"),
+    BotCommand("me", "Your download statistics"),
     BotCommand("help", "Usage and limits"),
     BotCommand("ping", "Check the bot is alive"),
 ]
@@ -85,6 +88,11 @@ def build_application(settings: Settings) -> Application:
     app.bot_data["downloaders"] = registry
     app.bot_data["jobs"] = JobStore()
     app.bot_data["metadata_tasks"] = MetadataTasks(capacity=2)
+    # Usage counters live on disk so /admin survives restarts; a read-only
+    # container silently falls back to an in-memory copy instead of crashing.
+    database = None if settings.usage_db == ":memory:" else settings.usage_db
+    usage = UsageStore(database)
+    app.bot_data["usage"] = usage
     uploader = None
     if settings.enable_mtproto:
         from gofile_bot.services.mtproto import MTProtoUploader
@@ -97,11 +105,13 @@ def build_application(settings: Settings) -> Application:
         job_timeout=settings.job_timeout,
         max_concurrent=settings.max_concurrent_downloads,
         mtproto_uploader=uploader,
+        usage=usage,
     )
 
     app.add_handler(CommandHandler("start", handlers.start_cmd))
     app.add_handler(CommandHandler("help", handlers.help_cmd))
     app.add_handler(CommandHandler("ping", handlers.ping_cmd))
+    app.add_handler(CommandHandler("me", handlers.me_cmd))
     app.add_handler(CommandHandler("gofile", handlers.gofile_cmd))
     app.add_handler(CommandHandler(["download", "dl"], handlers.download_cmd))
     app.add_handler(CommandHandler("links", handlers.links_cmd))
@@ -113,6 +123,12 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler(["supported", "sites"], handlers.supported_cmd))
     app.add_handler(CallbackQueryHandler(handlers.download_cb, pattern=r"^dl:"))
     app.add_handler(CallbackQueryHandler(handlers.cancel_cb, pattern=r"^cx:"))
+    app.add_handler(CallbackQueryHandler(handlers.menu_cb, pattern=r"^rc:"))
+    app.add_handler(CallbackQueryHandler(admin.admin_cb, pattern=r"^ad:"))
+    if settings.admin_user_ids:
+        app.add_handler(CommandHandler("admin", admin.admin_cmd))
+        app.add_handler(CommandHandler("ban", admin.ban_cmd))
+        app.add_handler(CommandHandler("unban", admin.unban_cmd))
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.Regex(_LINK_TEXT_RE),
@@ -125,6 +141,15 @@ def build_application(settings: Settings) -> Application:
 
 async def _startup(app: Application) -> None:
     """Start the downloader clients and sweep stale temp directories."""
+    app.bot_data["started_at"] = time.time()
+    usage = app.bot_data.get("usage")
+    if usage is not None:
+        await usage.open()
+        if usage.using_memory:
+            logger.warning(
+                "usage database %s is not writable; /admin stats will be lost on restart",
+                app.bot_data["settings"].usage_db,
+            )
     await app.bot_data["gofile"].start()
     await app.bot_data["downloaders"].start()
     uploader = app.bot_data.get("mtproto")
@@ -147,6 +172,12 @@ async def _startup(app: Application) -> None:
 
 
 async def _shutdown(app: Application) -> None:
+    usage = app.bot_data.get("usage")
+    if usage is not None:
+        try:
+            await usage.close()
+        except Exception:  # pragma: no cover - best effort
+            logger.debug("closing usage store failed", exc_info=True)
     try:
         uploader = app.bot_data.get("mtproto")
         if uploader is not None:

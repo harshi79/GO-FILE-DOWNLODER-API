@@ -43,67 +43,11 @@ from gofile_bot.services.resources import cancelable
 from gofile_bot.services.transfer import TransferService
 from gofile_bot.services.zip_extract import is_zip
 from gofile_bot.telegram import formatting as fmt
+from gofile_bot.telegram import menus
 from gofile_bot.telegram.keyboards import download_keyboard, link_keyboard
+from gofile_bot.telegram.rich import edit_rich, reply_rich, send_rich
 
 logger = logging.getLogger(__name__)
-
-START_TEXT = (
-    "👋 Hi! I download files from share links and send them right here.\n"
-    "\n"
-    "Just paste a link — GoFile, Google Drive, Dropbox, OneDrive, "
-    "MediaFire, Pixeldrain, archive.org, or a direct file link — and tap "
-    "「 DOWNLOAD 」.\n"
-    "\n"
-    "Examples:\n"
-    "https://gofile.io/d/xxxxxx\n"
-    "https://drive.google.com/file/d/…/view\n"
-    "/download https://example.com/file.zip\n"
-    "\n"
-    "Password-protected GoFile shares:\n"
-    "/gofile https://gofile.io/d/xxxxxx mypassword\n"
-    "\n"
-    "📦 Send a ZIP (≤20 MB) or use /extract <url> to unpack it safely.\n"
-    "Use /status to check the queue and /cancel to stop your job.\n\n"
-    "Type /help for details, /supported for all sources.\n"
-    "\n"
-    f"{fmt.MADE_BY}"
-)
-
-HELP_TEXT = (
-    "📖 <b>Help</b>\n"
-    "\n"
-    "<b>Commands</b>\n"
-    "/start — welcome message\n"
-    "/help — this message\n"
-    "/download &lt;url&gt; — download from any supported link (alias /dl)\n"
-    "/gofile &lt;url&gt; [password] — GoFile shares\n"
-    "/links &lt;url&gt; [password] — fresh browser download links\n"
-    "/supported — every source I can download from\n"
-    "/extract &lt;url&gt; — extract a ZIP (≤20 MB input and output)\n"
-    "/status — queue, limits and current job\n"
-    "/cancel — cancel your queued or running job\n"
-    "/ping — check I'm alive\n"
-    "\n"
-    "<b>How it works</b>\n"
-    "1. Paste a link (no command needed) or use /download.\n"
-    "2. The bot shows the file name, size and type.\n"
-    "3. Tap 「 DOWNLOAD 」 and the bot sends the file here.\n"
-    "\n"
-    "<b>Supported sources</b>\n"
-    "GoFile · Google Drive · Dropbox · OneDrive · MediaFire · Pixeldrain · "
-    "Internet Archive · direct http(s) file links\n"
-    "\n"
-    "<b>Good to know</b>\n"
-    "• Only public links work — private/login-only content can't be opened.\n"
-    "• Upload limit: {upload_limit} per file. /links avoids Telegram uploads.\n"
-    f"• Folder shares: the first {MAX_FOLDER_FILES} sendable files are delivered.\n"
-    "• You can tap Cancel while a download is running.\n"
-    "• ZIPs: at most 20 MB compressed AND expanded, 20 files; no nested extraction.\n"
-    "• One active transfer globally; a bounded queue protects the server.\n"
-    "• Passwords stay only in the temporary in-memory job (not on disk).\n"
-    "\n"
-    f"{fmt.MADE_BY}"
-)
 
 USAGE_HINT = (
     "Use /download with a link, or just paste one:\n"
@@ -203,6 +147,65 @@ def _transfer(context: ContextTypes.DEFAULT_TYPE) -> TransferService:
     return _bot_data(context)["transfer"]
 
 
+def _usage(context: ContextTypes.DEFAULT_TYPE):
+    return _bot_data(context).get("usage")
+
+
+def _module_mode(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, int]:
+    """(transport label, delivery cap) for menus."""
+    settings = _bot_data(context).get("settings")
+    if settings is None:
+        return "Cloud API", MAX_FILE_BYTES
+    mode = (
+        "MTProto"
+        if settings.enable_mtproto
+        else "Local Bot API"
+        if settings.telegram_api_url
+        else "Cloud API"
+    )
+    return mode, min(settings.max_file_bytes, HARD_MAX_FILE_BYTES)
+
+
+async def _track(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, *, command: str | None = None
+) -> None:
+    """Best-effort activity tracking; never blocks or breaks a handler."""
+    usage = _usage(context)
+    user = getattr(update, "effective_user", None)
+    if user is None:
+        query = getattr(update, "callback_query", None)
+        user = getattr(query, "from_user", None) if query is not None else None
+    if usage is None or user is None:
+        return
+    try:
+        await usage.touch_user(
+            user.id,
+            username=getattr(user, "username", None),
+            first_name=getattr(user, "first_name", None),
+            command=command,
+        )
+    except Exception:  # pragma: no cover - stats must never break the bot
+        logger.debug("usage tracking failed", exc_info=True)
+
+
+def _is_banned(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> bool:
+    usage = _usage(context)
+    return bool(usage is not None and user_id is not None and usage.is_banned(user_id))
+
+
+async def _reply_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, menu) -> None:
+    message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+    if message is None:
+        return
+    await reply_rich(
+        message,
+        context.application.bot,
+        menu.rich,
+        fallback_html=menu.html,
+        reply_markup=menu.fallback_markup,
+    )
+
+
 def parse_command_args(text: str) -> tuple[str, str | None]:
     """Split ``/gofile <url> [password]`` into url and optional password.
 
@@ -236,17 +239,21 @@ def looks_like_supported_link(url: str, registry: DownloaderRegistry) -> bool:
 # Commands
 # ---------------------------------------------------------------------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _track(update, context, command="start")
+    user = update.effective_user
+    if _is_banned(context, user.id if user else None):
+        await update.message.reply_text("🚫 You are blocked from using this bot.")
+        return
     if update.message:
-        await update.message.reply_text(START_TEXT)
+        _mode, limit = _module_mode(context)
+        await _reply_menu(update, context, menus.start_menu(limit))
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _track(update, context, command="help")
     if update.message:
-        settings = _bot_data(context).get("settings")
-        limit = settings.max_file_bytes if settings else MAX_FILE_BYTES
-        await update.message.reply_html(
-            HELP_TEXT.replace("{upload_limit}", fmt.human_size(limit))
-        )
+        _mode, limit = _module_mode(context)
+        await _reply_menu(update, context, menus.help_menu(limit))
 
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -255,20 +262,38 @@ async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def supported_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _track(update, context, command="supported")
     if not update.message:
         return
-    lines = ["📥 <b>Supported sources</b>\n"]
-    for provider in _downloaders(context).all():
-        lines.append(
-            f"• <b>{fmt.esc(provider.label)}</b> — {fmt.esc(provider.description)}"
-        )
-        for example in provider.examples:
-            lines.append(f"   <code>{fmt.esc(example)}</code>")
-    lines.append("\nJust paste a link, or use /download &lt;url&gt;.")
-    await update.message.reply_html("\n".join(lines))
+    await _reply_menu(update, context, menus.supported_menu(_downloaders(context).all()))
+
+
+async def me_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/me — the caller's own download statistics."""
+    await _track(update, context, command="me")
+    user = update.effective_user
+    if update.message is None or user is None:
+        return
+    usage = _usage(context)
+    try:
+        stats = await usage.user(user.id) if usage is not None else None
+    except Exception:  # pragma: no cover - stats must never break /me
+        logger.debug("could not read usage stats", exc_info=True)
+        stats = None
+    if stats is None:
+        from gofile_bot.services.usage import UserStats
+
+        stats = UserStats(user_id=user.id)
+    mode, limit = _module_mode(context)
+    await _reply_menu(update, context, menus.profile_menu(stats, mode=mode, limit=limit))
 
 
 async def _dispatch_metadata(update, context, factory):
+    user = getattr(update, "effective_user", None)
+    if _is_banned(context, user.id if user else None):
+        await update.message.reply_text("🚫 You are blocked from using this bot.")
+        return
+
     async def safe_request():
         try:
             import asyncio
@@ -420,6 +445,11 @@ async def uploaded_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     message = update.message
     if not message or not message.document:
         return
+    user = getattr(update, "effective_user", None)
+    if _is_banned(context, user.id if user else None):
+        await message.reply_text("🚫 You are blocked from using this bot.")
+        return
+    await _track(update, context)
     document = message.document
     file = RemoteFile(
         id=document.file_id,
@@ -460,6 +490,11 @@ async def uploaded_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         + "\n\nSafety limits: 20 MB archive + 20 MB total extracted; at most 20 files.",
         download_keyboard(job.id, extract_only=True),
         force=True,
+        rich=fmt.info_rich(
+            file,
+            "Uploaded ZIP",
+            note="Safety limits: 20 MB archive + 20 MB total extracted; at most 20 files.",
+        ),
     )
 
 
@@ -472,20 +507,11 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     own = f"Your job: {job.phase}." if job else "You have no queued/running transfer."
     if state["position"]:
         own += f" Queue position: {state['position']}."
-    settings = _bot_data(context).get("settings")
-    mode = (
-        "MTProto"
-        if settings and settings.enable_mtproto
-        else "Local API"
-        if settings and settings.telegram_api_url
-        else "Cloud API"
+    mode, delivery_limit = _module_mode(context)
+    menu = menus.status_menu(
+        mode=mode, limit=delivery_limit, state=state, job=job, own_text=own
     )
-    delivery_limit = settings.max_file_bytes if settings else MAX_FILE_BYTES
-    await update.message.reply_text(
-        f"Mode: {mode} · configured delivery cap: {fmt.human_size(delivery_limit)}\n"
-        f"📊 Active: {state['active']} · Waiting: {state['queued']} · Capacity: {state['capacity']} jobs\n"
-        f"{own}\n📦 ZIP: 20 MB input + output cap. Hard download ceiling: 2,000,000,000 bytes."
-    )
+    await _reply_menu(update, context, menu)
 
 
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -504,6 +530,7 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def _start_link_flow(update, context, url, **kwargs):
+    await _track(update, context)
     await _dispatch_metadata(
         update, context, lambda: _resolve_link_flow(update, context, url, **kwargs)
     )
@@ -605,6 +632,11 @@ async def _resolve_link_flow(
             + fmt.too_big_note(content.size, limit),
             None,
             force=True,
+            rich=fmt.info_rich(
+                content,
+                provider.label,
+                note=fmt.too_big_note(content.size, limit).strip(),
+            ),
         )
         return
 
@@ -624,6 +656,7 @@ async def _resolve_link_flow(
             extract_only=action == "extract",
         ),
         force=True,
+        rich=fmt.info_rich(content, provider.label, note=extra.strip()),
     )
 
 
@@ -662,6 +695,11 @@ async def _action_cb(update, context, action):
             show_alert=True,
         )
         return
+
+    if _is_banned(context, user_id):
+        await query.answer(text="🚫 You are blocked from using this bot.", show_alert=True)
+        return
+    await _track(update, context)
 
     active = _jobs(context).active_for_user(user_id)
     if job.running or (active is not None and active.id != job.id):
@@ -705,6 +743,61 @@ async def _action_cb(update, context, action):
     except Exception:  # pragma: no cover - transfer.run already contains errors
         logger.exception("transfer crashed for job %s", job.id)
         job.running = False
+
+
+async def menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Inline buttons on the rich /start and /help menus (``rc:`` prefix)."""
+    query = update.callback_query
+    if query is None or query.message is None:
+        return
+    action = (query.data or "")[3:]
+    mode, limit = _module_mode(context)
+    if action == "supported":
+        menu = menus.supported_menu(_downloaders(context).all())
+    elif action == "help":
+        menu = menus.help_menu(limit)
+    elif action == "status":
+        service = _transfer(context)
+        job = _jobs(context).active_for_user(update.effective_user.id)
+        state = service.snapshot(job)
+        own = f"Your job: {job.phase}." if job else "You have no queued/running transfer."
+        if state["position"]:
+            own += f" Queue position: {state['position']}."
+        menu = menus.status_menu(mode=mode, limit=limit, state=state, job=job, own_text=own)
+    elif action == "profile":
+        usage = _usage(context)
+        user = update.effective_user
+        stats = await usage.user(user.id) if usage is not None and user else None
+        if stats is None:
+            from gofile_bot.services.usage import UserStats
+
+            stats = UserStats(user_id=user.id if user else 0)
+        menu = menus.profile_menu(stats, mode=mode, limit=limit)
+    else:
+        await query.answer()
+        return
+
+    await query.answer()
+    chat_id = getattr(query.message, "chat_id", None)
+    message_id = getattr(query.message, "message_id", None)
+    if chat_id is None or message_id is None:
+        return
+    if await edit_rich(
+        context.application.bot,
+        chat_id,
+        message_id,
+        menu.rich,
+        fallback_html=menu.html,
+        reply_markup=menu.fallback_markup,
+    ):
+        return
+    await send_rich(
+        context.application.bot,
+        chat_id,
+        menu.rich,
+        fallback_html=menu.html,
+        reply_markup=menu.fallback_markup,
+    )
 
 
 async def cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

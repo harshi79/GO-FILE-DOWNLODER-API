@@ -62,8 +62,16 @@ credentials and never bypasses access controls).
   busy response rather than allocating unlimited waiting tasks.
 - **ZIP extraction**: upload a ZIP document or use `/extract <url>`, then tap
   **Extract ZIP**. Both input and total output are capped at **20 MB**.
+- **Rich messages** (Bot API 10.1–10.3): native headings, tables, lists,
+  quotes and collapsible details for `/start`, `/help`, `/supported`,
+  `/status`, `/me`, file cards and progress. A full HTML
+  fallback keeps older Bot API servers and clients working.
 - **Responsive controls**: `/status`, `/cancel`, queue positions, download
   speed/ETA, styled buttons and copy-link buttons. No paid Telegram features.
+- **Personal stats**: `/me` shows your downloads, failed jobs, data received
+  and account status.
+- **Operator panel** (`/admin`, admin-only): live usage overview, user list,
+  per-user download counts, recent downloads, bans/unbans and stat resets.
 - Graceful handling of invalid links, dead/private content, wrong passwords,
   rate limits (bounded backoff), timeouts, oversized files, Telegram's upload
   limit, and user cancellation.
@@ -83,10 +91,14 @@ credentials and never bypasses access controls).
 | `/gofile <url> <password>` | Password-protected GoFile share (password may contain spaces) |
 | `/extract <url> [share-password]` | Extract a ZIP, ≤20 MB archive AND output; alias `/unzip` |
 | `/status` | Queue, active transport, configured limits, and your job phase |
+| `/me` | Your own usage statistics (downloads, data, failures) |
 | `/cancel` | Stop your queued/running transfer or metadata lookup |
 | `/links <url> [password]` | Fresh host download URLs, without Telegram upload size caps |
 | `/supported` | List every supported source (alias `/sites`) |
 | `/ping` | Check the bot is alive |
+| `/admin` | Operator panel: usage overview, users, bans, recent downloads |
+| `/ban <id> [reason]` | Operator: block a user |
+| `/unban <id>` | Operator: restore access |
 
 Pasting a link works for all supported hosts, and for direct links whose URL
 ends in a file extension (`.zip`, `.mp4`, …). Use `/download` to force any
@@ -144,6 +156,9 @@ GOFILE_WT_SALT=12af056dacea0b
 | `TELEGRAM_API_URL` | no | Origin of your **Local Bot API** server started with `--local`, e.g. `http://telegram-bot-api:8081`. Enables a hard 2,000,000,000-byte per-file cap. Not a switch that upgrades the public API. |
 | `DOWNLOAD_DIR` | no | Temporary download directory. Local API mode needs both processes to access the same absolute path, with matching permissions. |
 | `PORT` | no | Port for the `/health` server (default `10000`); Render sets this automatically. |
+| `ADMIN_USER_IDS` | no | Comma-separated numeric Telegram ids allowed to use `/admin`, `/ban` and `/unban`. Empty disables the panel. |
+| `USAGE_DB` | no | SQLite file for usage counters. Defaults to `$DATA_DIR/usage.sqlite3` or `./data/usage.sqlite3`. Use `:memory:` to disable persistence. |
+| `DATA_DIR` | no | Directory for the usage database; the Docker image sets `/app/data`. Mount a persistent volume here to keep `/admin` stats across redeploys. |
 
 Other operational limits are constants in [`gofile_bot/config.py`](gofile_bot/config.py).
 Cloud-only mode uses the existing 48 MiB safety cap and 30-minute timeout.
@@ -572,6 +587,58 @@ or use a command:
 Please only download content you have the right to access, and respect each
 service's terms.
 
+## Rich messages (Bot API 10.1–10.3)
+
+The bot speaks the **native rich message format** introduced in Bot API 10.1
+and extended through 10.3, instead of only HTML text. `python-telegram-bot`
+22.8 does not wrap these methods yet, so `gofile_bot/telegram/rich.py` calls
+`sendRichMessage` / `editMessageText` (with a `rich_message` payload) through
+`Bot.do_api_request` using plain JSON.
+
+What uses it:
+
+| Message | Rich features |
+| --- | --- |
+| `/start`, `/help` | Headings, ordered/bullet lists, command table, collapsible details |
+| `/supported` | Striped compact source table, examples list, collapsible "what never works" |
+| File card | File/folder table (size, type, source) with the existing Download keyboard |
+| Download progress | Progress bar, speed/ETA table (throttled like before) |
+| `/status`, `/me` | Compact stat tables |
+| `/admin` | Usage overview, user/bans tables and recent-download table |
+
+Safety rules enforced by the builders before anything is sent:
+
+- 32,768 UTF-8 characters, 500 blocks, 16 nesting levels, 50 media items.
+- Tables: at most 20 columns and 100 rows; every cell carries `align` and
+  `valign`, because the API marks them required.
+- Button rows: 1–8 buttons; labels/link targets are truncated to API limits.
+
+If the server reports that rich messages are unsupported (older Bot API
+server or local server), the bot automatically falls back to the HTML text
+for up to six hours, then retries. Every rich call also has an immediate
+HTML fallback, so a failure never loses a message.
+
+### Operator panel
+
+Set `ADMIN_USER_IDS` to your numeric Telegram id(s) (`/start` with
+[@userinfobot](https://t.me/userinfobot) to find it). Then `/admin` opens a
+private panel:
+
+- **Overview** — users, 24-hour growth, downloads, failures, bytes delivered,
+  active bans, live queue and uptime.
+- **Users / Top** — paginated list with downloads, failures, data and last
+  activity; tap a user to ban, unban or reset their stats.
+- **Bans** — current blocks with one-tap unban.
+- **Recent** — the last 10 transfers (user, source, size, age).
+- **Settings** — read-only view of the active transport, caps and whether
+  statistics are persistent.
+
+Statistics are stored in SQLite (`USAGE_DB`). The bot tracks each user's
+commands, completed downloads, failures, delivered bytes and last activity;
+per-download rows are kept for the recent list. If the database path is not
+writable, the bot logs a warning and keeps working with in-memory stats
+instead of crashing.
+
 ## Limits
 
 | Limit | Value | Where to change |
@@ -633,11 +700,15 @@ allows larger uploads — follow the large-file setup above. Do not just raise
 │   │   ├── zip_extract.py     # Isolated ZIP worker lifecycle
 │   │   ├── zip_worker.py      # Safe bounded ZIP extraction (stdlib only)
 │   │   ├── status.py          # Throttled edits of the status message
+│   │   ├── usage.py           # SQLite usage counters + bans (operator panel)
 │   │   └── transfer.py        # Download→upload orchestration + cleanup
 │   └── telegram/
-│       ├── formatting.py      # HTML message builders
+│       ├── admin.py           # /admin, /ban, /unban operator panel
+│       ├── formatting.py      # HTML + rich message builders
 │       ├── handlers.py        # Commands, pasted links, button callbacks
-│       └── keyboards.py       # Inline keyboards
+│       ├── keyboards.py       # Inline keyboards
+│       ├── menus.py           # Rich menus with HTML fallbacks
+│       └── rich.py            # Bot API 10.1–10.3 rich blocks + send/edit
 ├── tests/                     # Unit tests (mocked network, no real API calls)
 ├── Dockerfile                 # Non-root python:3.11-slim image with HEALTHCHECK
 ├── render.yaml                # Render Blueprint (Docker web service + /health)

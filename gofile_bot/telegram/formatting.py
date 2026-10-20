@@ -153,3 +153,167 @@ def caption_for(file: RemoteFile) -> str:
         f"💾 {human_size(file.size)} · 🗂 {esc(file_type_label(file))}\n"
         f"{MADE_BY}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Rich (Bot API 10.1+) counterparts
+# ---------------------------------------------------------------------------
+def human_duration(seconds: float) -> str:
+    """75 -> '1m 15s'."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+
+
+def _progress_rich(
+    *,
+    verb: str,
+    filename: str,
+    received: int,
+    total: int | None,
+    file_index: int | None = None,
+    file_count: int | None = None,
+    elapsed: float | None = None,
+):
+    """Shared rich progress card for downloads and uploads."""
+    from gofile_bot.telegram.rich import (
+        RichMessage,
+        footer,
+        heading,
+        pre,
+        table,
+    )
+
+    rows: list[list[str]] = [["📄 File", filename]]
+    if file_index is not None and file_count is not None:
+        rows.append(["📎 Part", f"{file_index}/{file_count}"])
+    if total:
+        percent = min(100, int(received * 100 / total))
+        bar_len = 12
+        filled = int(bar_len * percent / 100)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        rows.append(["💾 Size", f"{human_size(received)} / {human_size(total)}"])
+        if elapsed and elapsed >= 1 and received > 0:
+            speed = received / elapsed
+            remaining = max(0, int((total - received) / speed))
+            rows.append(["⚡ Speed", f"{human_size(speed)}/s"])
+            rows.append(["⏱ ETA", human_duration(remaining)])
+        title = f"⏳ {verb}… {percent}%"
+    else:
+        bar = "█" * (int(elapsed or 0) % 12 + 1) + "░" * (11 - int(elapsed or 0) % 12)
+        rows.append(["💾 Received", human_size(received)])
+        title = f"⏳ {verb}…"
+
+    rich = RichMessage().add(
+        heading(title, 3),
+        pre(bar),
+        table(["Field", "Value"], rows, compact=True, aligns=["left", "left"]),
+        footer("Use /cancel to stop · /status for the queue"),
+    )
+    return rich
+
+
+def progress_rich(
+    *,
+    filename: str,
+    received: int,
+    total: int | None,
+    file_index: int | None = None,
+    file_count: int | None = None,
+    elapsed: float | None = None,
+):
+    return _progress_rich(
+        verb="Downloading",
+        filename=filename,
+        received=received,
+        total=total,
+        file_index=file_index,
+        file_count=file_count,
+        elapsed=elapsed,
+    )
+
+
+def upload_progress_rich(
+    *, filename: str, sent: int, total: int | None, elapsed: float | None = None
+):
+    return _progress_rich(
+        verb="Uploading to Telegram",
+        filename=filename,
+        received=sent,
+        total=total,
+        elapsed=elapsed,
+    )
+
+
+def uploading_rich(
+    filename: str, *, file_index: int | None = None, file_count: int | None = None
+):
+    from gofile_bot.telegram.rich import RichMessage, footer, heading, table
+
+    rows = [["📄 File", filename]]
+    if file_index is not None and file_count is not None:
+        rows.append(["📎 Part", f"{file_index}/{file_count}"])
+    return RichMessage().add(
+        heading("📤 Uploading to Telegram…", 3),
+        table(["Field", "Value"], rows, compact=True, aligns=["left", "left"]),
+        footer("You can cancel while the upload runs."),
+    )
+
+
+def info_rich(content: Content, source_label: str | None = None, note: str = ""):
+    """Rich version of :func:`info_text` (file/folder card)."""
+    from gofile_bot.telegram.rich import RichMessage, footer, heading, paragraph, table
+
+    if isinstance(content, RemoteFile):
+        rows = [
+            ["💾 Size", _size_label(content.size)],
+            ["🗂 Type", file_type_label(content)],
+        ]
+        if source_label:
+            rows.append(["🌐 Source", source_label])
+        rich = RichMessage().add(
+            heading(f"📄 {content.name}", 3),
+            table(["Field", "Value"], rows, compact=True, aligns=["left", "left"]),
+        )
+    else:
+        files = content.files()
+        total = sum(file.size for file in files)
+        rows = [
+            ["📄 Files", str(len(files))],
+            ["💾 Total size", _size_label(total)],
+        ]
+        if source_label:
+            rows.append(["🌐 Source", source_label])
+        rich = RichMessage().add(
+            heading(f"📁 {content.name}", 3),
+            paragraph(f"Folder · {len(files)} file(s)"),
+            table(["Field", "Value"], rows, compact=True, aligns=["left", "left"]),
+        )
+    if note:
+        rich.add(paragraph(note))
+    rich.add(footer(MADE_BY))
+    return rich
+
+
+def success_rich(content: Content, sent: list[str] | None = None, note: str = ""):
+    """Rich version of :func:`success_text`."""
+    from gofile_bot.telegram.rich import RichMessage, bold, bullets, footer, heading, paragraph
+
+    if isinstance(content, RemoteFile):
+        body = paragraph([bold(content.name), f" · {human_size(content.size)}"])
+        rich = RichMessage().add(heading("✅ Delivered", 3), body)
+    else:
+        count = len(sent) if sent is not None else content.file_count
+        rich = RichMessage().add(
+            heading("✅ Folder delivered", 3),
+            paragraph([f"{count} file(s) from ", bold(content.name)]),
+        )
+        if sent:
+            rich.add(bullets(*sent[:10]))
+    if note:
+        rich.add(paragraph(note))
+    rich.add(footer(MADE_BY))
+    return rich

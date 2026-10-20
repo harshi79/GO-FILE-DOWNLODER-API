@@ -21,5 +21,11 @@ services:
         value: "true" # set "false" to accept only known file hosts
       - key: ENABLE_MTPROTO
         value: "false" # change to "true" and add API_ID/API_HASH for ~2 GB files
+      - key: ADMIN_USER_IDS
+        sync: false # your numeric Telegram id(s), comma-separated
+      # Usage stats live at DATA_DIR/usage.sqlite3. Render's disk is
+      # ephemeral unless you attach a persistent disk and mount it at DATA_DIR.
+      - key: DATA_DIR
+        value: /app/data
       # Optional big-file mode: add API_ID and API_HASH privately in the
       # service's Environment dashboard, then redeploy. No extra server needed.
