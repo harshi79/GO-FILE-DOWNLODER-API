@@ -9,6 +9,7 @@ adjust when running the bot.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -236,8 +237,7 @@ def parse_admin_ids(raw: str) -> tuple[int, ...]:
     to nobody (or worse, to the wrong person).
     """
     seen: list[int] = []
-    for chunk in raw.replace(";", ",").replace(" ", ",").split(","):
-        chunk = chunk.strip()
+    for chunk in re.split(r"[\s,;]+", raw.strip()):
         if not chunk:
             continue
         if not chunk.isdigit():

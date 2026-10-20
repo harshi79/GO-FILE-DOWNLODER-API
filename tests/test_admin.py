@@ -16,6 +16,7 @@ from gofile_bot.telegram.rich import RichMessage
 # ---------------------------------------------------------------------------
 def test_parse_admin_ids_accepts_common_separators():
     assert parse_admin_ids("1, 2 3;4") == (1, 2, 3, 4)
+    assert parse_admin_ids("1\n2\t3") == (1, 2, 3)
     assert parse_admin_ids(" 7 , 7 ") == (7,)
     assert parse_admin_ids("") == ()
 
