@@ -48,8 +48,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     from gofile_bot.app import run
+    from gofile_bot.polling import InstanceLockError
 
-    run(settings)
+    try:
+        run(settings)
+    except InstanceLockError as exc:
+        logging.getLogger("gofile_bot").error("startup aborted: %s", exc)
+        return 1
     return 0
 
 
