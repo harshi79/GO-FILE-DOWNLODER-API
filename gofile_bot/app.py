@@ -25,6 +25,12 @@ from gofile_bot.config import Settings, get_health_port, MAX_UPDATE_QUEUE
 from gofile_bot.downloaders import build_registry
 from gofile_bot.gofile.client import GoFileClient
 from gofile_bot.health import start_health_server, stop_health_server
+from gofile_bot.polling import (
+    InstanceLock,
+    InstanceLockError,
+    PollingConflictGuard,
+    start_guarded_polling,
+)
 from gofile_bot.services.jobs import JobStore
 from gofile_bot.services.resources import MetadataTasks
 from gofile_bot.downloaders.telegram_zip import TelegramZipDownloader
@@ -155,6 +161,21 @@ async def _shutdown(app: Application) -> None:
 
 async def run_async(settings: Settings) -> None:
     """Run bot + health server on one event loop until SIGINT/SIGTERM."""
+    # Two pollers for one BOT_TOKEN fight over every long poll (Telegram
+    # answers the loser with 409 Conflict). Refuse to start a second copy on
+    # this host instead of half-working; lock files never go stale because
+    # the kernel releases ``flock`` when a process dies.
+    lock = InstanceLock(settings.bot_token)
+    if not lock.acquire():
+        raise InstanceLockError(lock.busy_message())
+    try:
+        await _run_locked(settings)
+    finally:
+        lock.release()
+
+
+async def _run_locked(settings: Settings) -> None:
+    """Start the bot, health server and poller; cleanup on any exit path."""
     port = get_health_port()
     application = build_application(settings)
 
@@ -173,10 +194,19 @@ async def run_async(settings: Settings) -> None:
         await application.initialize()
         await _startup(application)
         health_runner = await start_health_server(port)
-        if application.updater:
-            await application.updater.start_polling(
+        if stop_event.is_set():
+            # SIGTERM arrived while starting up (deploy/scale-down). Do not
+            # grab updates just to drop them again on the way out.
+            logger.info("shutdown requested during startup; not starting polling")
+        elif application.updater:
+            # Conflict (409) is expected while an old instance is still being
+            # stopped during a deploy: log one actionable warning, not a
+            # traceback per retry.
+            await start_guarded_polling(
+                application.updater,
                 allowed_updates=ALLOWED_UPDATES,
                 drop_pending_updates=True,
+                guard=PollingConflictGuard(),
             )
         await application.start()
         logger.info("bot is running — health check on port %d (/health)", port)

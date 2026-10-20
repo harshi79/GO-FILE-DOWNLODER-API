@@ -165,6 +165,11 @@ The bot runs long polling — no webhook or public IP needed. At the same time
 it serves `GET /health` → `200 OK` on `0.0.0.0:$PORT` (default `10000`) for
 Docker and Render health checks. Stop with `Ctrl+C`.
 
+Telegram allows one poller per `BOT_TOKEN`. A second copy on the same machine
+refuses to start (advisory lock in the temp directory, released automatically
+when the process exits) instead of fighting the first one for updates; see
+[One poller per bot token](#one-poller-per-bot-token-409-conflict).
+
 ---
 
 ## ZIP extraction and responsive controls
@@ -468,6 +473,32 @@ space and bandwidth. A separate Local Bot API server needs additional resources.
 > **Alternatives that work with the exact same `Dockerfile`:** Fly.io,
 > Railway, Koyeb, Northflank, or any small VPS (`docker run`).
 
+### One poller per bot token (`409 Conflict`)
+
+Telegram delivers updates to a **single** `getUpdates` consumer per bot token.
+A zero-downtime deploy starts the new container before stopping the old one,
+so for a few seconds both poll and Telegram answers the loser with:
+
+```
+telegram.error.Conflict: Conflict: terminated by other getUpdates request;
+make sure that only one bot instance is running
+```
+
+That message is expected during a rollout and clears by itself when the old
+container exits. The bot treats it accordingly:
+
+- the first conflict is **one warning** with the likely causes, then quiet
+  retries — no per-attempt error traceback;
+- if it persists (a second Render service/deploy, an old container that
+  ignored shutdown, or a local copy sharing `BOT_TOKEN`), a reminder follows
+  every minute and a single `CRITICAL` message after five minutes;
+- two bot processes on the *same* host are refused at startup by an advisory
+  lock in the temp directory, so a local copy cannot silently fight the
+  deployed one.
+
+The instance that keeps losing stays alive but idle, and takes over
+automatically as soon as the duplicate stops.
+
 ### Plain Docker
 
 ```bash
@@ -568,6 +599,7 @@ allows larger uploads — follow the large-file setup above. Do not just raise
 │   ├── metadata.py            # Bounded metadata reads (1 MiB)
 │   ├── errors.py              # Typed errors with friendly user messages
 │   ├── health.py              # Tiny aiohttp server: GET /health -> 200 OK
+│   ├── polling.py             # Single-poller lock + 409 Conflict handling
 │   ├── downloaders/           # One provider module per source
 │   │   ├── __init__.py        # build_registry(): routing order
 │   │   ├── base.py            # Downloader interface + registry
@@ -649,6 +681,8 @@ against mocked transports. No live Telegram or file-host calls are made.
 | "at its safe capacity" | The bounded queue/metadata slots are full; retry later. |
 | "ZIP rejected" | Check the 20 MB input/output cap, supported compression, entry count and safe filenames. |
 | "disk-backed storage" | Set `DOWNLOAD_DIR` to real disk storage, not tmpfs; leave enough free space. |
+| `Conflict: terminated by other getUpdates request` | Two processes poll the same bot token. Deploy overlap clears in seconds by itself; if it keeps repeating, stop the duplicate — a second Render service/deploy, an old container that ignored shutdown, or a local `python -m gofile_bot`. See [One poller per bot token](#one-poller-per-bot-token-409-conflict). |
+| `startup aborted: Another bot process is already polling` | A second copy on the same host uses the same `BOT_TOKEN`. Stop it (the lock is released automatically when that process exits). |
 | GoFile downloads suddenly fail with "not accepting requests" | GoFile may have rotated the salt in its web client; update `GOFILE_WT_SALT` with the current value from `gofile.io`'s `wt` script, or set a Premium `GOFILE_API_TOKEN`. |
 | MediaFire/Kraken-style host stops working | Page-scrape providers break when the site changes its HTML — open an issue with a sample link. |
 
