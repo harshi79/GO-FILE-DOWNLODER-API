@@ -25,7 +25,6 @@ from gofile_bot.config import (
 from gofile_bot.downloaders.base import DownloaderRegistry
 from gofile_bot.errors import (
     BotError,
-    FileTooLargeError,
     InvalidURLError,
     JobBusyError,
     JobExpiredError,
@@ -120,8 +119,9 @@ DOWNLOAD_USAGE = (
 _PASTED_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _BARE_HOST_RE = re.compile(
     r"\b(?:www\.)?(?:gofile\.io|pixeldrain\.com|mediafire\.com|"
-    r"drive\.google\.com|docs\.google\.com|dropbox\.com|1drv\.ms|"
-    r"onedrive\.live\.com|archive\.org)/[^\s<>\"']+",
+    r"drive\.google\.com|docs\.google\.com|dropbox\.com|1drv\.ms|1drv\.com|"
+    r"onedrive\.live\.com|onedrive\.com|(?:[\w-]+\.)*sharepoint\.com|"
+    r"(?:[\w-]+\.)*archive\.org)/[^\s<>\"']+",
     re.IGNORECASE,
 )
 _TRAILING_PUNCT = ").,]}'\""
@@ -561,12 +561,14 @@ async def _resolve_link_flow(
         limit = min(
             settings.max_file_bytes if settings else MAX_FILE_BYTES, HARD_MAX_FILE_BYTES
         )
-        if isinstance(content, RemoteFile) and content.size > limit:
-            raise FileTooLargeError(size=content.size, limit=limit)
+        if (
+            action == "extract"
+            and isinstance(content, RemoteFile)
+            and content.size > MAX_ZIP_BYTES
+        ):
+            raise ZipSafetyError()
         if action == "extract" and (
-            not isinstance(content, RemoteFile)
-            or not is_zip(content)
-            or content.size > MAX_ZIP_BYTES
+            not isinstance(content, RemoteFile) or not is_zip(content)
         ):
             raise ZipSafetyError()
         job.content = content
@@ -588,6 +590,23 @@ async def _resolve_link_flow(
     finally:
         job.running = False
         job.phase = "ready" if job.content is not None else "failed"
+
+    # A file that exceeds the configured upload transport is shown with an
+    # explanation but no Download button: pressing it could only fail after a
+    # pointless download.  /links still works, and the card stays informative.
+    over_limit = (
+        isinstance(content, RemoteFile)
+        and content.size > limit
+        and action != "extract"
+    )
+    if over_limit:
+        await status_helper.edit(
+            fmt.info_text(content, provider.label)
+            + fmt.too_big_note(content.size, limit),
+            None,
+            force=True,
+        )
+        return
 
     extra = ""
     if isinstance(content, RemoteFolder) and content.file_count > MAX_FOLDER_FILES:

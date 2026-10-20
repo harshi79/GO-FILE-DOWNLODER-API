@@ -152,11 +152,16 @@ async def stream_to_file(
     public_only: bool = False,
     resolver: Resolver | None = None,
     expected_size: int | None = None,
+    allow_html: bool = False,
 ) -> Path:
     """Stream *url* to *dest* following redirects manually; return *dest*.
 
     Exactly one of *allowed_hosts* (host allowlist) or *public_only* (SSRF
     check) should typically be set; both may be combined.
+
+    HTML responses are refused unless they carry an ``attachment`` disposition
+    (or *allow_html* is true), so a login/quota/consent page is never saved and
+    uploaded to the user as if it were the requested file.
     """
     timeout = aiohttp.ClientTimeout(
         total=None, connect=30, sock_read=DOWNLOAD_SOCK_READ_TIMEOUT
@@ -188,6 +193,16 @@ async def stream_to_file(
                     continue
                 if resp.status != 200:
                     raise RemoteDownloadError(f"HTTP {resp.status} for {current}")
+
+                disposition = str(resp.headers.get("Content-Disposition", "")).lower()
+                if (
+                    not allow_html
+                    and content_type_of(resp.headers) in ("text/html", "application/xhtml+xml")
+                    and "attachment" not in disposition
+                ):
+                    raise RemoteDownloadError(
+                        f"HTTP 200 for {current} returned an HTML page, not a file"
+                    )
 
                 if resp.headers.get("Content-Encoding", "identity").lower() not in ("", "identity"):
                     raise RemoteDownloadError("Server ignored identity encoding; compressed transfer refused")

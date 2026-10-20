@@ -57,8 +57,8 @@ BOT_COMMANDS = [
 #: Pasted text that might contain a downloadable link.
 _LINK_TEXT_RE = (
     r"(?i)https?://|www\.|gofile\.io/|pixeldrain\.com/|mediafire\.com/|"
-    r"drive\.google\.com/|docs\.google\.com/|dropbox\.com/|1drv\.ms/|"
-    r"onedrive\.live\.com/|archive\.org/"
+    r"drive\.google\.com/|docs\.google\.com/|dropbox\.com/|1drv\.ms/|1drv\.com/|"
+    r"onedrive\.live\.com/|onedrive\.com/|sharepoint\.com/|archive\.org/"
 )
 
 

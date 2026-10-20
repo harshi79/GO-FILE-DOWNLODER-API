@@ -345,3 +345,64 @@ async def test_transfer_refreshes_old_cdn_link_before_download():
     await TransferService(context.application.bot, context.application.bot_data["downloaders"]).run(job)
     provider.resolve.assert_awaited_once_with(job.source_url, password="secret")
     assert seen == ["https://fakehost.example/new"]
+
+
+def test_extract_first_url_knows_sharepoint_and_onedrive_hosts():
+    assert (
+        handlers.extract_first_url(
+            "contoso.sharepoint.com/:b:/g/personal/x/abc?e=xyz"
+        )
+        == "https://contoso.sharepoint.com/:b:/g/personal/x/abc?e=xyz"
+    )
+    assert (
+        handlers.extract_first_url("1drv.ms/u/s!AbCdEf")
+        == "https://1drv.ms/u/s!AbCdEf"
+    )
+
+
+async def test_over_limit_file_shows_card_without_dead_download_button():
+    from gofile_bot.telegram import formatting as fmt
+
+    class HugeProvider(Downloader):
+        name = "hugehost"
+        label = "HugeHost"
+        description = "Huge files"
+
+        def matches(self, url):
+            return True
+
+        async def resolve(self, url, password=None):
+            return RemoteFile(
+                id="h1",
+                name="movie.mp4",
+                size=10**9,
+                mimetype="video/mp4",
+                link="https://hugehost.example/dl/h1",
+            )
+
+        async def download(self, *args, **kwargs):  # pragma: no cover
+            raise AssertionError("must not be called for an oversized card")
+
+    registry = DownloaderRegistry([HugeProvider()])
+    bot = SimpleNamespace(edit_message_text=AsyncMock(), send_document=AsyncMock())
+    application = SimpleNamespace(
+        bot=bot,
+        bot_data={
+            "jobs": JobStore(),
+            "downloaders": registry,
+            "transfer": SimpleNamespace(run=AsyncMock()),
+            "settings": SimpleNamespace(max_file_bytes=48 * 1024 * 1024),
+        },
+    )
+    context = SimpleNamespace(application=application)
+    update = make_update("/download https://hugehost.example/f/1")
+
+    await handlers.download_cmd(update, context)
+
+    kwargs = bot.edit_message_text.await_args.kwargs
+    assert "movie.mp4" in kwargs["text"]
+    assert "larger than" in kwargs["text"]
+    assert "/links" in kwargs["text"]
+    assert kwargs["reply_markup"] is None
+    # The size is reported up-front, so nothing was downloaded.
+    assert fmt.human_size(10**9) in kwargs["text"]
