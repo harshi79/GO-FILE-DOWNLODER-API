@@ -164,6 +164,10 @@ class Settings:
     enable_mtproto: bool = False
     api_id: int | None = None
     api_hash: str | None = field(default=None, repr=False)
+    #: Numeric Telegram ids allowed to open /admin and /ban (empty = disabled).
+    admin_user_ids: tuple[int, ...] = ()
+    #: SQLite file for usage counters (":memory:" for a non-persistent store).
+    usage_db: str | None = "data/usage.sqlite3"
 
     def __post_init__(self) -> None:
         if self.enable_mtproto:
@@ -224,6 +228,39 @@ def get_health_port() -> int:
     return port
 
 
+def parse_admin_ids(raw: str) -> tuple[int, ...]:
+    """Parse ``ADMIN_USER_IDS`` (comma/space separated numeric Telegram ids).
+
+    Rows are de-duplicated and keep their order. Any non-numeric entry is a
+    configuration error: silently ignoring a typo would leave the panel open
+    to nobody (or worse, to the wrong person).
+    """
+    seen: list[int] = []
+    for chunk in raw.replace(";", ",").replace(" ", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if not chunk.isdigit():
+            raise ValueError(f"ADMIN_USER_IDS must be numeric Telegram ids, got {chunk!r}")
+        value = int(chunk)
+        if value <= 0:
+            raise ValueError("ADMIN_USER_IDS values must be positive integers")
+        if value not in seen:
+            seen.append(value)
+    return tuple(seen)
+
+
+def _usage_db_path() -> str:
+    """USAGE_DB wins; otherwise ``$DATA_DIR/usage.sqlite3`` or ./data/usage.sqlite3."""
+    explicit = os.environ.get("USAGE_DB", "").strip()
+    if explicit:
+        return explicit
+    data_dir = os.environ.get("DATA_DIR", "").strip()
+    if data_dir:
+        return os.path.join(data_dir, "usage.sqlite3")
+    return os.path.join("data", "usage.sqlite3")
+
+
 def load_settings(env_file: str | None = ".env") -> Settings:
     """Build :class:`Settings` from the environment.
 
@@ -256,6 +293,8 @@ def load_settings(env_file: str | None = ".env") -> Settings:
     except ValueError as exc:
         raise ValueError("API_ID must be a positive integer") from exc
 
+    admin_ids = parse_admin_ids(os.environ.get("ADMIN_USER_IDS", ""))
+
     return Settings(
         bot_token=bot_token,
         gofile_api_token=api_token,
@@ -266,4 +305,6 @@ def load_settings(env_file: str | None = ".env") -> Settings:
         enable_mtproto=_env_bool("ENABLE_MTPROTO", False),
         api_id=api_id,
         api_hash=os.environ.get("API_HASH", "").strip() or None,
+        admin_user_ids=admin_ids,
+        usage_db=_usage_db_path(),
     )

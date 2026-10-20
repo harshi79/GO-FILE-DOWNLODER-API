@@ -5,6 +5,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     MALLOC_ARENA_MAX=2 \
     DOWNLOAD_DIR=/app/downloads \
+    DATA_DIR=/app/data \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PORT=10000
@@ -19,7 +20,7 @@ RUN pip install -r requirements.txt
 COPY gofile_bot/ ./gofile_bot/
 
 # Run as a non-root user
-RUN mkdir -p /app/downloads \
+RUN mkdir -p /app/downloads /app/data \
     && useradd --create-home --uid 10001 botuser \
     && chown -R botuser:botuser /app
 USER botuser

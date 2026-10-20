@@ -38,6 +38,8 @@ class Job:
     running: bool = False
     action: str = "download"
     phase: str = "ready"
+    #: Bytes actually delivered to Telegram (for /me and the admin panel).
+    bytes_sent: int = 0
 
     @property
     def cancelled(self) -> bool:
