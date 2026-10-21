@@ -91,7 +91,7 @@ def start_menu(limit: int) -> Menu:
         paragraph(
             [
                 "Sources: ",
-                bold("GoFile · Google Drive · Dropbox · OneDrive · MediaFire · "
+                bold("GoFile · Google Drive · Dropbox · OneDrive · Pasteview · MediaFire · "
                      "Pixeldrain · archive.org · direct links"),
             ]
         ),
@@ -118,7 +118,7 @@ def start_menu(limit: int) -> Menu:
         "👋 <b>Hi!</b> I download files from share links and send them right here.\n"
         "\n"
         "Just paste a link — GoFile, Google Drive, Dropbox, OneDrive, "
-        "MediaFire, Pixeldrain, archive.org, or a direct file link — and tap "
+        "MediaFire, Pasteview, Pixeldrain, archive.org, or a direct file link — and tap "
         "「 DOWNLOAD 」.\n"
         "\n"
         "<b>Examples</b>\n"
@@ -208,7 +208,7 @@ def help_menu(limit: int) -> Menu:
         "2. The bot shows the file name, size and type.\n"
         "3. Tap 「 DOWNLOAD 」 and the bot sends the file here.\n"
         "\n<b>Supported sources</b>\n"
-        "GoFile · Google Drive · Dropbox · OneDrive · MediaFire · Pixeldrain · "
+        "GoFile · Google Drive · Dropbox · OneDrive · Pasteview · MediaFire · Pixeldrain · "
         "Internet Archive · direct http(s) file links\n"
         "\n<b>Good to know</b>\n"
         "• Only public links work — private/login-only content can't be opened.\n"
@@ -232,6 +232,7 @@ _SOURCE_NOTES = {
     "dropbox": "Shared links; folders arrive as a .zip",
     "onedrive": "Personal + SharePoint “anyone with the link” files",
     "pixeldrain": "Files and lists via the official API",
+    "pasteview": "Public pastes as UTF-8 .txt files (not linked files)",
     "mediafire": "Single public files",
     "archive": "Item pages resolve to their file list",
     "direct": "Any public http(s) URL that points at a file",

@@ -29,6 +29,7 @@ resource smoke test below; this is not a promise of unlimited throughput.
 | **Pixeldrain** | `pixeldrain.com/u/…`, `/l/…` | Official public API | Files and lists |
 | **MediaFire** | `mediafire.com/file/…/file` | Reads the public download button on the file page | Single files (no folders) |
 | **Internet Archive** | `archive.org/details/…` | Public metadata API | Item pages resolve to their file list |
+| **Pasteview** | `pasteview.com/AbCd123` | Public paste code block → UTF-8 `.txt` | Public text only; does not follow links inside pastes; 1 MiB page cap |
 | **Direct link** | `example.com/file.zip` | HEAD probe + stream, SSRF-guarded | Any public http(s) URL that points straight at a file |
 
 Only **public** links work anywhere: content that needs a login, a paid
