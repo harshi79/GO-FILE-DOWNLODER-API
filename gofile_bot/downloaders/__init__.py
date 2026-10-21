@@ -17,6 +17,7 @@ from gofile_bot.downloaders.gdrive import GoogleDriveDownloader
 from gofile_bot.downloaders.gofile_provider import GoFileDownloader
 from gofile_bot.downloaders.mediafire import MediaFireDownloader
 from gofile_bot.downloaders.onedrive import OneDriveDownloader
+from gofile_bot.downloaders.pasteview import PasteviewDownloader
 from gofile_bot.downloaders.pixeldrain import PixeldrainDownloader
 from gofile_bot.gofile.client import GoFileClient
 
@@ -37,6 +38,7 @@ def build_registry(settings: Settings, gofile: GoFileClient) -> DownloaderRegist
         PixeldrainDownloader(),
         MediaFireDownloader(),
         ArchiveOrgDownloader(),
+        PasteviewDownloader(),
     ]
     if settings.enable_direct_downloads:
         providers.append(DirectDownloader())

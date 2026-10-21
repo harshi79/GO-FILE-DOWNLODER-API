@@ -62,7 +62,7 @@ DOWNLOAD_USAGE = (
 
 _PASTED_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _BARE_HOST_RE = re.compile(
-    r"\b(?:www\.)?(?:gofile\.io|pixeldrain\.com|mediafire\.com|"
+    r"\b(?:www\.)?(?:pasteview\.com|gofile\.io|pixeldrain\.com|mediafire\.com|"
     r"drive\.google\.com|docs\.google\.com|dropbox\.com|1drv\.ms|1drv\.com|"
     r"onedrive\.live\.com|onedrive\.com|(?:[\w-]+\.)*sharepoint\.com|"
     r"(?:[\w-]+\.)*archive\.org)/[^\s<>\"']+",
